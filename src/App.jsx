@@ -297,6 +297,16 @@ tr:hover td{background:rgba(45,212,191,.03)}
 .supervisor-note-box{background:linear-gradient(135deg,rgba(45,212,191,.07),rgba(129,140,248,.05));border:1px solid var(--border);border-radius:var(--r);padding:16px;margin-top:16px}
 .section-title{font-family:var(--display);font-size:16px;font-weight:700;margin-bottom:4px}
 .section-sub{font-size:12px;color:var(--t2);margin-bottom:16px}
+.all-wards-header{background:linear-gradient(135deg,rgba(45,212,191,.1),rgba(129,140,248,.07));border:1px solid var(--border);border-radius:var(--r-lg);padding:16px 20px;margin-bottom:18px;display:flex;align-items:flex-start;justify-content:space-between;gap:14px;flex-wrap:wrap}
+.ward-block{background:var(--card);border:1px solid var(--border2);border-radius:var(--r-lg);margin-bottom:14px;overflow:hidden}
+.ward-block-header{padding:13px 16px;border-bottom:1px solid var(--border2);display:flex;align-items:center;justify-content:space-between;background:var(--bg3)}
+.ward-block-title{font-weight:700;font-size:14px;display:flex;align-items:center;gap:8px}
+.ward-block-body{padding:14px 16px}
+.shift-report-item{padding:10px 12px;background:var(--bg3);border-radius:var(--r-sm);margin-bottom:8px;border-left:3px solid var(--accent)}
+.shift-report-item:last-child{margin-bottom:0}
+.shift-label{font-size:10px;font-weight:700;color:var(--accent);text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px;display:flex;align-items:center;justify-content:space-between}
+.shift-report-text{font-size:12px;color:var(--t1);line-height:1.65;white-space:pre-wrap}
+.ward-empty{padding:14px;font-size:12px;color:var(--t3);font-style:italic;text-align:center}
 .theme-light{--bg:#f0f4f8;--bg2:#e4ecf4;--bg3:#d6e2ee;--card:#fff;--card2:#f4f8fb;--t1:#0f2942;--t2:#3d6482;--t3:#6a99b8;--border2:rgba(0,0,0,.08);--border:rgba(45,212,191,.25)}
 @media print{.sidebar,.topbar,.ai-bar,.quick-actions,.btn,button,.tabs-bar,.notif-panel{display:none!important}.main{margin-left:0!important}.pt-detail{padding:0!important}}
 @media(max-width:768px){.sidebar{transform:translateX(-100%);transition:transform .25s}.main{margin-left:0}.pt-panel{display:none}.form-row{grid-template-columns:1fr}.vitals-row{grid-template-columns:repeat(3,1fr)}}
@@ -749,11 +759,16 @@ function OverallNurseModal({ open, onClose, users, overallNurse, onAssign, onEnd
         <div className="form-group"><label className="form-label">Assign Nurse</label>
           <select className="form-select" value={sel} onChange={e => setSel(e.target.value)}>
             <option value="">— Select nurse —</option>
-            {users.map(u => <option key={u.uid || u.id} value={u.name}>{u.name} ({u.role})</option>)}
+            {users.map(u => <option key={u.uid || u.id} value={u.uid || u.id}>{u.name} ({u.role})</option>)}
           </select>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
-          <button className="btn btn-primary" style={{ flex: 1 }} onClick={() => { if (sel) { onAssign(sel); setSel(""); } }}>✅ Assign</button>
+          <button className="btn btn-primary" style={{ flex: 1 }} onClick={() => {
+            if (sel) {
+              const picked = users.find(u => (u.uid || u.id) === sel);
+              if (picked) { onAssign({ name: picked.name, uid: picked.uid || picked.id }); setSel(""); }
+            }
+          }}>✅ Assign</button>
           <button className="btn btn-danger" style={{ flex: 1 }} onClick={onEnd}>End Shift</button>
         </div>
       </div>
@@ -1406,6 +1421,109 @@ function ReportsSection({ patients, user }) {
   );
 }
 
+// ─── ALL WARDS 24HR REPORT (Overall Nurse view) ───────────────────────────────
+function AllWardsReportSection({ wardReports }) {
+  const [date, setDate] = useState(today());
+
+  // Get all reports for selected date, grouped by ward, sorted alphabetically
+  const reportsByWard = WARDS.slice().sort().reduce((acc, ward) => {
+    const reports = wardReports
+      .filter(r => r.ward === ward && r.date === date)
+      .sort((a, b) => a.shift.localeCompare(b.shift));
+    acc[ward] = reports;
+    return acc;
+  }, {});
+
+  const totalSubmitted = Object.values(reportsByWard).filter(r => r.length > 0).length;
+  const totalReports = Object.values(reportsByWard).reduce((s, r) => s + r.length, 0);
+
+  const shiftColor = (shift) => {
+    if (shift.startsWith("Morning")) return "var(--warning)";
+    if (shift.startsWith("Afternoon")) return "var(--accent)";
+    return "var(--purple)";
+  };
+
+  const shiftIcon = (shift) => {
+    if (shift.startsWith("Morning")) return "🌅";
+    if (shift.startsWith("Afternoon")) return "☀️";
+    return "🌙";
+  };
+
+  return (
+    <div style={{ flex: 1, overflowY: "auto", padding: 18 }}>
+      {/* Header */}
+      <div className="all-wards-header">
+        <div>
+          <div style={{ fontFamily: "var(--display)", fontSize: 18, fontWeight: 700, marginBottom: 4 }}>
+            📋 24-Hour Nurses Report
+          </div>
+          <div style={{ fontSize: 12, color: "var(--t2)" }}>
+            All ward reports for the day · Visible to Overall Nurse only
+          </div>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+          <div>
+            <div style={{ fontSize: 9, fontWeight: 700, color: "var(--t3)", textTransform: "uppercase", letterSpacing: ".5px", marginBottom: 3 }}>Date</div>
+            <input className="form-input" type="date" value={date} onChange={e => setDate(e.target.value)} style={{ width: 150, padding: "6px 10px" }} />
+          </div>
+        </div>
+      </div>
+
+      {/* Summary row */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(100px,1fr))", gap: 9, marginBottom: 18 }}>
+        {[
+          ["Total Wards", WARDS.length, "🏥"],
+          ["Reported", totalSubmitted, "✅"],
+          ["Pending", WARDS.length - totalSubmitted, "⏳"],
+          ["Reports", totalReports, "📝"],
+        ].map(([l, v, icon]) => (
+          <div key={l} className="stat-card">
+            <div className="stat-icon">{icon}</div>
+            <div className="stat-label">{l}</div>
+            <div className="stat-value" style={{ color: l === "Pending" && v > 0 ? "var(--warning)" : "var(--t1)" }}>{v}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Wards list — alphabetical */}
+      {WARDS.slice().sort().map(ward => {
+        const reports = reportsByWard[ward] || [];
+        const hasReports = reports.length > 0;
+        return (
+          <div key={ward} className="ward-block">
+            <div className="ward-block-header">
+              <div className="ward-block-title">
+                <span style={{ fontSize: 16 }}>🏥</span>
+                <span>{ward}</span>
+              </div>
+              <span className={`badge ${hasReports ? "badge-active" : "badge-held"}`}>
+                {hasReports ? `✅ ${reports.length} report${reports.length > 1 ? "s" : ""}` : "⏳ No report"}
+              </span>
+            </div>
+            <div className="ward-block-body">
+              {hasReports ? (
+                reports.map(r => (
+                  <div key={r.id} className="shift-report-item" style={{ borderLeftColor: shiftColor(r.shift) }}>
+                    <div className="shift-label">
+                      <span>{shiftIcon(r.shift)} {r.shift}</span>
+                      <span style={{ color: "var(--t3)", fontWeight: 400, fontSize: 10 }}>
+                        By {r.nurse} · {r.submittedAt ? new Date(r.submittedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "—"}
+                      </span>
+                    </div>
+                    <div className="shift-report-text">{r.report}</div>
+                  </div>
+                ))
+              ) : (
+                <div className="ward-empty">No report submitted for {date}</div>
+              )}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 // ─── WARD 24HR REPORT (Ward Nurse view) ──────────────────────────────────────
 function WardReportSection({ user, wardReports, onSave, showToast }) {
   const myWard = user.ward || "";
@@ -1715,7 +1833,7 @@ function MainApp({ user, onLogout }) {
   const [selectedId, setSelectedId] = useState(null);
   const [filter, setFilter] = useState("active");
   const [section, setSection] = useState("patients");
-  const [overallNurse, setOverallNurse] = useState(null);
+  const [overallNurse, setOverallNurse] = useState(null);       // { name, uid } | null
   const [allUsers, setAllUsers] = useState([]);
   const [wardReports, setWardReports] = useState([]);
   const [archives, setArchives] = useState([]);
@@ -1730,7 +1848,7 @@ function MainApp({ user, onLogout }) {
 
   useEffect(() => {
     const unsubPt = FB.onPatients(pts => { setPatients(pts); setLoading(false); });
-    const unsubNurse = FB.onSettings("overallNurse", d => setOverallNurse(d?.name || null));
+    const unsubNurse = FB.onSettings("overallNurse", d => setOverallNurse(d?.name ? { name: d.name, uid: d.uid || null } : null));
     const unsubWR = FB.onWardReports(setWardReports);
     const unsubAR = FB.on24hrArchives(setArchives);
     FB.getUsers().then(setAllUsers).catch(() => {});
@@ -1744,6 +1862,8 @@ function MainApp({ user, onLogout }) {
   });
   const selected = patients.find(p => p.id === selectedId) || null;
   const roleLabel = user.role === "wardmaster" ? "Ward Master" : user.role === "supervisor" ? "Supervisor" : "Ward Nurse";
+  // true when the currently logged-in user is the assigned overall nurse of the day
+  const isOverallNurse = !!(overallNurse?.uid && overallNurse.uid === user.uid);
 
   const handleAddPatient = async (data) => {
     const patient = {
@@ -1786,6 +1906,12 @@ function MainApp({ user, onLogout }) {
           <button className={`nav-btn ${section === "overview" ? "active" : ""}`} onClick={() => setSection("overview")}><span className="ni">🗺️</span>Ward Overview</button>
           <button className={`nav-btn ${section === "reports" ? "active" : ""}`} onClick={() => setSection("reports")}><span className="ni">📊</span>Reports</button>
           {user.role === "nurse" && <button className={`nav-btn ${section === "wardreport" ? "active" : ""}`} onClick={() => setSection("wardreport")}><span className="ni">📝</span>Ward Report</button>}
+          {isOverallNurse && (
+            <button className={`nav-btn ${section === "allwardsreport" ? "active" : ""}`} onClick={() => setSection("allwardsreport")} style={{ color: "var(--warning)" }}>
+              <span className="ni">📋</span>24hr Nurses Report
+              <span style={{ marginLeft: "auto", background: "var(--warning)", color: "#000", fontSize: 9, fontWeight: 700, borderRadius: 10, padding: "1px 5px" }}>ALL</span>
+            </button>
+          )}
           {(user.role === "supervisor" || user.role === "wardmaster") && <button className={`nav-btn ${section === "collation" ? "active" : ""}`} onClick={() => setSection("collation")}><span className="ni">👑</span>24hr Collation</button>}
           <button className="nav-btn" onClick={() => openM("overallNurse")}><span className="ni">👑</span>Overall Nurse</button>
           <div className="nav-section">AI Tools</div>
@@ -1799,7 +1925,7 @@ function MainApp({ user, onLogout }) {
           <div className="sb-footer">
             <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11 }}>
               <div style={{ width: 7, height: 7, borderRadius: "50%", background: "var(--success)", boxShadow: "0 0 6px var(--success)", animation: "pulse 2s infinite" }} />
-              <span style={{ fontWeight: 600, color: "var(--success)" }}>{overallNurse}</span>
+              <span style={{ fontWeight: 600, color: "var(--success)" }}>{overallNurse?.name}</span>
               <span style={{ color: "var(--t3)" }}>on duty</span>
             </div>
           </div>
@@ -1810,9 +1936,9 @@ function MainApp({ user, onLogout }) {
       <div className="main">
         <div className="topbar">
           <div style={{ flexShrink: 0 }}>
-            <div className="tb-title">{section === "overview" ? "Ward Overview" : section === "reports" ? "Reports" : section === "wardreport" ? "Ward Report" : section === "collation" ? "24hr Collation" : "Patients"}</div>
+            <div className="tb-title">{section === "overview" ? "Ward Overview" : section === "reports" ? "Reports" : section === "wardreport" ? "Ward Report" : section === "collation" ? "24hr Collation" : section === "allwardsreport" ? "24hr Nurses Report" : "Patients"}</div>
             <div className="tb-sub">
-              {section === "patients" ? `${filtered.length} ${filter} patient${filtered.length !== 1 ? "s" : ""}` : section === "overview" ? `${patients.filter(p => (p.status || "active") === "active").length} active` : section === "wardreport" ? (user.ward || "No ward") : section === "collation" ? `${wardReports.filter(r => r.date === new Date().toISOString().split("T")[0]).length} reports today` : `${patients.length} total`}
+              {section === "patients" ? `${filtered.length} ${filter} patient${filtered.length !== 1 ? "s" : ""}` : section === "overview" ? `${patients.filter(p => (p.status || "active") === "active").length} active` : section === "wardreport" ? (user.ward || "No ward") : section === "collation" ? `${wardReports.filter(r => r.date === new Date().toISOString().split("T")[0]).length} reports today` : section === "allwardsreport" ? `${WARDS.length} wards · Overall Nurse view` : `${patients.length} total`}
             </div>
           </div>
           <GlobalSearch patients={patients} onSelect={handleSelectPatient} />
@@ -1828,6 +1954,7 @@ function MainApp({ user, onLogout }) {
           {section === "overview" && <WardOverview patients={patients} onSelectPatient={handleSelectPatient} />}
           {section === "reports" && <ReportsSection patients={patients} user={user} />}
           {section === "wardreport" && <WardReportSection user={user} wardReports={wardReports} showToast={showToast} />}
+          {section === "allwardsreport" && <AllWardsReportSection wardReports={wardReports} />}
           {section === "collation" && <SupervisorCollationSection user={user} wardReports={wardReports} archives={archives} showToast={showToast} />}
           {section === "patients" && <>
             <div className="pt-panel">
@@ -1871,9 +1998,9 @@ function MainApp({ user, onLogout }) {
       </div>
 
       <AddPatientModal open={!!modals.addPatient} onClose={() => closeM("addPatient")} onSave={handleAddPatient} user={user} />
-      <OverallNurseModal open={!!modals.overallNurse} onClose={() => closeM("overallNurse")} users={allUsers} overallNurse={overallNurse}
-        onAssign={async n => { await FB.saveSettings("overallNurse", { name: n }); showToast(n + " assigned as Overall Nurse."); closeM("overallNurse"); }}
-        onEnd={async () => { await FB.saveSettings("overallNurse", { name: null }); showToast("Shift ended."); closeM("overallNurse"); }} />
+      <OverallNurseModal open={!!modals.overallNurse} onClose={() => closeM("overallNurse")} users={allUsers} overallNurse={overallNurse?.name || null}
+        onAssign={async ({ name, uid }) => { await FB.saveSettings("overallNurse", { name, uid }); showToast(name + " assigned as Overall Nurse."); closeM("overallNurse"); }}
+        onEnd={async () => { await FB.saveSettings("overallNurse", { name: null, uid: null }); showToast("Shift ended."); closeM("overallNurse"); }} />
       <UserMgmtModal open={!!modals.userMgmt} onClose={() => closeM("userMgmt")} users={allUsers} currentUser={user} />
       <AIChatModal open={!!modals.aiChat} onClose={() => closeM("aiChat")} />
     </div>
