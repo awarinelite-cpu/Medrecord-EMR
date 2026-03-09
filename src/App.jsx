@@ -2717,7 +2717,7 @@ function MainApp({ user, onLogout }) {
             </div>
             {selected
               ? <>
-                  {searchSelectedId === selected.id && (
+                  {isNurse && !canSeeAllWards && selected.ward && user.ward && selected.ward !== user.ward && (
                     <div style={{ background: "rgba(251,191,36,.1)", border: "1px solid rgba(251,191,36,.3)", borderRadius: "var(--r)", padding: "8px 14px", marginBottom: 10, fontSize: 12, color: "var(--warning)", display: "flex", alignItems: "center", gap: 8 }}>
                       🔍 Viewing patient from <strong style={{marginLeft:4}}>{selected.ward}</strong>&nbsp;— found via EMR search
                     </div>
