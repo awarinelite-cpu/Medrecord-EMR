@@ -2231,9 +2231,33 @@ function MainApp({ user, onLogout }) {
 }
 
 // ─── ROOT ─────────────────────────────────────────────────────────────────────
+function usePWAInstall() {
+  const [prompt, setPrompt] = useState(null);
+  const [installed, setInstalled] = useState(false);
+  useEffect(() => {
+    const handler = (e) => { e.preventDefault(); setPrompt(e); };
+    window.addEventListener('beforeinstallprompt', handler);
+    window.addEventListener('appinstalled', () => { setPrompt(null); setInstalled(true); });
+    return () => window.removeEventListener('beforeinstallprompt', handler);
+  }, []);
+  const install = async () => {
+    if (!prompt) return;
+    prompt.prompt();
+    const { outcome } = await prompt.userChoice;
+    if (outcome === 'accepted') setInstalled(true);
+    setPrompt(null);
+  };
+  return { prompt, installed, install };
+}
+
 export default function App() {
   const [user, setUser] = useState(null);
   const [checking, setChecking] = useState(true);
+  const { prompt, install } = usePWAInstall();
+  const [bannerDismissed, setBannerDismissed] = useState(() => {
+    try { return localStorage.getItem('pwa-dismissed') === '1'; } catch { return false; }
+  });
+
   useEffect(() => {
     const unsub = FB.onAuth(async (fbUser) => {
       if (fbUser) { const p = await FB.getProfile(fbUser.uid); setUser(p ? { uid: fbUser.uid, email: fbUser.email, ...p } : null); }
@@ -2242,6 +2266,21 @@ export default function App() {
     });
     return () => unsub();
   }, []);
+
+  const dismissBanner = () => { try { localStorage.setItem('pwa-dismissed', '1'); } catch {} setBannerDismissed(true); };
+
+  const PWABanner = prompt && !bannerDismissed ? (
+    <div style={{ position: 'fixed', bottom: 0, left: 0, right: 0, zIndex: 9999, background: '#0f1e2e', borderTop: '1px solid rgba(45,212,191,0.3)', padding: '12px 16px', display: 'flex', alignItems: 'center', gap: 12, boxShadow: '0 -4px 20px rgba(0,0,0,0.4)' }}>
+      <div style={{ fontSize: 24, flexShrink: 0 }}>⚕️</div>
+      <div style={{ flex: 1 }}>
+        <div style={{ fontSize: 13, fontWeight: 700, color: '#e2eaf4' }}>Install MedRecord</div>
+        <div style={{ fontSize: 11, color: '#7fa8c9', marginTop: 2 }}>Add to home screen for quick offline access</div>
+      </div>
+      <button onClick={install} style={{ background: 'linear-gradient(135deg,#2dd4bf,#14b8a6)', color: '#000', border: 'none', borderRadius: 8, padding: '8px 14px', fontSize: 12, fontWeight: 700, cursor: 'pointer', flexShrink: 0 }}>Install</button>
+      <button onClick={dismissBanner} style={{ background: 'none', border: 'none', color: '#7fa8c9', fontSize: 18, cursor: 'pointer', flexShrink: 0, lineHeight: 1 }}>✕</button>
+    </div>
+  ) : null;
+
   if (checking) return (
     <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "#0b1623" }}>
       <style>{css}</style>
@@ -2252,6 +2291,6 @@ export default function App() {
       </div>
     </div>
   );
-  if (!user) return (<><style>{css}</style><LoginPage onLogin={setUser} /></>);
-  return <MainApp user={user} onLogout={async () => { await FB.logout(); setUser(null); }} />;
+  if (!user) return (<><style>{css}</style><LoginPage onLogin={setUser} />{PWABanner}</>);
+  return <><MainApp user={user} onLogout={async () => { await FB.logout(); setUser(null); }} />{PWABanner}</>;
 }
