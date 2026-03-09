@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { initializeApp } from "firebase/app";
 import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, onAuthStateChanged, sendPasswordResetEmail } from "firebase/auth";
-import { getFirestore, doc, setDoc, getDoc, collection, onSnapshot, serverTimestamp, query, orderBy, getDocs } from "firebase/firestore";
+import { getFirestore, doc, setDoc, getDoc, collection, onSnapshot, serverTimestamp, query, orderBy, getDocs, addDoc, updateDoc } from "firebase/firestore";
 
 const firebaseConfig = {
   apiKey: "AIzaSyD91f4UJKPXZEpfXV_QoggsZq1R_9WcC4s",
@@ -32,6 +32,25 @@ const FB = {
   onPatients: (cb) => { const q = query(collection(db, "patients"), orderBy("createdAt", "desc")); return onSnapshot(q, s => cb(s.docs.map(d => d.data()))); },
   saveSettings: async (key, data) => { await setDoc(doc(db, "settings", key), { ...data, updatedAt: serverTimestamp() }); },
   onSettings: (key, cb) => onSnapshot(doc(db, "settings", key), s => cb(s.exists() ? s.data() : null)),
+  // 24hr ward reports
+  saveWardReport: async (data) => {
+    const id = data.id || ("WR-" + Math.random().toString(36).slice(2,10));
+    await setDoc(doc(db, "wardReports", id), { ...data, id, updatedAt: serverTimestamp() });
+    return id;
+  },
+  onWardReports: (cb) => {
+    const q = query(collection(db, "wardReports"), orderBy("date", "desc"));
+    return onSnapshot(q, s => cb(s.docs.map(d => d.data())));
+  },
+  save24hrArchive: async (data) => {
+    const id = data.id || ("AR-" + Math.random().toString(36).slice(2,10));
+    await setDoc(doc(db, "shiftArchives", id), { ...data, id, archivedAt: serverTimestamp() });
+    return id;
+  },
+  on24hrArchives: (cb) => {
+    const q = query(collection(db, "shiftArchives"), orderBy("archivedAt", "desc"));
+    return onSnapshot(q, s => cb(s.docs.map(d => d.data())));
+  },
 };
 
 const WARDS = ["Ward A – General Medicine","Ward B – Surgical","Ward C – Pediatrics","Ward D – Cardiology","Ward E – Orthopedics","Ward F – ICU","Ward G – Maternity","Ward H – Oncology"];
@@ -262,6 +281,22 @@ tr:hover td{background:rgba(45,212,191,.03)}
 .overall-row{display:flex;align-items:center;gap:8px;padding:10px 12px;background:var(--bg3);border:1px solid var(--border2);border-radius:var(--r);margin-bottom:12px}
 .overall-dot{width:8px;height:8px;border-radius:50%;background:var(--t3);flex-shrink:0}
 .overall-dot.on{background:var(--success);box-shadow:0 0 8px var(--success);animation:pulse 2s infinite}
+.ward-report-card{background:var(--card);border:1px solid var(--border2);border-radius:var(--r);padding:14px 16px;margin-bottom:10px}
+.ward-report-card.submitted{border-color:rgba(52,211,153,.3);background:rgba(52,211,153,.04)}
+.ward-report-card.missing{border-color:rgba(251,191,36,.25);background:rgba(251,191,36,.03)}
+.ward-report-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+.ward-report-name{font-weight:700;font-size:13px}
+.ward-report-meta{font-size:11px;color:var(--t2);margin-top:2px}
+.ward-report-body{font-size:12px;color:var(--t1);line-height:1.6;white-space:pre-wrap;background:var(--bg3);border-radius:var(--r-sm);padding:10px 12px;margin-top:8px}
+.collation-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:12px;margin-bottom:20px}
+.archive-card{background:var(--card);border:1px solid var(--border2);border-radius:var(--r);padding:14px 16px;margin-bottom:10px}
+.archive-header{display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:10px;gap:10px}
+.archive-title{font-family:var(--display);font-size:14px;font-weight:700}
+.archive-meta{font-size:11px;color:var(--t2);margin-top:2px}
+.archive-note{background:rgba(45,212,191,.07);border:1px solid var(--border);border-radius:var(--r-sm);padding:10px 12px;font-size:12px;color:var(--t1);line-height:1.6;margin-top:8px}
+.supervisor-note-box{background:linear-gradient(135deg,rgba(45,212,191,.07),rgba(129,140,248,.05));border:1px solid var(--border);border-radius:var(--r);padding:16px;margin-top:16px}
+.section-title{font-family:var(--display);font-size:16px;font-weight:700;margin-bottom:4px}
+.section-sub{font-size:12px;color:var(--t2);margin-bottom:16px}
 .theme-light{--bg:#f0f4f8;--bg2:#e4ecf4;--bg3:#d6e2ee;--card:#fff;--card2:#f4f8fb;--t1:#0f2942;--t2:#3d6482;--t3:#6a99b8;--border2:rgba(0,0,0,.08);--border:rgba(45,212,191,.25)}
 @media print{.sidebar,.topbar,.ai-bar,.quick-actions,.btn,button,.tabs-bar,.notif-panel{display:none!important}.main{margin-left:0!important}.pt-detail{padding:0!important}}
 @media(max-width:768px){.sidebar{transform:translateX(-100%);transition:transform .25s}.main{margin-left:0}.pt-panel{display:none}.form-row{grid-template-columns:1fr}.vitals-row{grid-template-columns:repeat(3,1fr)}}
@@ -1371,6 +1406,309 @@ function ReportsSection({ patients, user }) {
   );
 }
 
+// ─── WARD 24HR REPORT (Ward Nurse view) ──────────────────────────────────────
+function WardReportSection({ user, wardReports, onSave, showToast }) {
+  const myWard = user.ward || "";
+  const [date, setDate] = useState(today());
+  const [shift, setShift] = useState(SHIFTS[0]);
+  const [report, setReport] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  // find existing report for this ward/date/shift
+  const existing = wardReports.find(r => r.ward === myWard && r.date === date && r.shift === shift);
+
+  useEffect(() => {
+    if (existing) setReport(existing.report || "");
+    else setReport("");
+  }, [existing?.id, date, shift]);
+
+  const handleSave = async () => {
+    if (!report.trim()) { showToast("Report content is required.", "error"); return; }
+    setSaving(true);
+    try {
+      const data = {
+        id: existing?.id || ("WR-" + Math.random().toString(36).slice(2,10)),
+        ward: myWard, date, shift,
+        report: report.trim(),
+        nurse: user.name,
+        nurseId: user.uid,
+        submittedAt: new Date().toISOString(),
+      };
+      await FB.saveWardReport(data);
+      showToast("Ward report saved successfully.");
+    } catch(e) { showToast("Error: " + e.message, "error"); }
+    setSaving(false);
+  };
+
+  // history: all reports for this ward
+  const myHistory = wardReports.filter(r => r.ward === myWard).slice(0, 20);
+
+  return (
+    <div style={{ flex: 1, overflowY: "auto", padding: 18 }}>
+      <div className="section-title">📝 Ward Shift Report</div>
+      <div className="section-sub">{myWard || "No ward assigned"} · Write your shift report below</div>
+
+      <div className="card" style={{ padding: 16, marginBottom: 18 }}>
+        <div className="form-row" style={{ marginBottom: 12 }}>
+          <div className="form-group" style={{ marginBottom: 0 }}>
+            <label className="form-label">Date</label>
+            <input className="form-input" type="date" value={date} onChange={e => setDate(e.target.value)} />
+          </div>
+          <div className="form-group" style={{ marginBottom: 0 }}>
+            <label className="form-label">Shift</label>
+            <select className="form-select" value={shift} onChange={e => setShift(e.target.value)}>
+              {SHIFTS.map(s => <option key={s}>{s}</option>)}
+            </select>
+          </div>
+        </div>
+        {existing && (
+          <div style={{ fontSize: 11, color: "var(--success)", marginBottom: 8, display: "flex", alignItems: "center", gap: 5 }}>
+            <span>✅</span> Report already submitted for this shift — editing will update it.
+          </div>
+        )}
+        <div className="form-group">
+          <label className="form-label">Shift Report *</label>
+          <textarea
+            className="form-textarea"
+            style={{ minHeight: 160 }}
+            value={report}
+            onChange={e => setReport(e.target.value)}
+            placeholder={`Write your ${shift} report for ${myWard}…\n\nInclude: patient status updates, incidents, medications given, observations, handover notes…`}
+          />
+        </div>
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+          <button className="btn btn-ghost btn-sm" onClick={() => setReport("")}>🗑️ Clear</button>
+          <button className="btn btn-primary" onClick={handleSave} disabled={saving}>
+            {saving ? "Saving…" : existing ? "✏️ Update Report" : "💾 Submit Report"}
+          </button>
+        </div>
+      </div>
+
+      {myHistory.length > 0 && (
+        <>
+          <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 10, color: "var(--t2)" }}>📚 My Past Reports</div>
+          {myHistory.map(r => (
+            <div key={r.id} className="ward-report-card submitted">
+              <div className="ward-report-header">
+                <div>
+                  <div className="ward-report-name">{r.shift}</div>
+                  <div className="ward-report-meta">{r.date} · {r.nurse}</div>
+                </div>
+                <span className="badge badge-active">Submitted</span>
+              </div>
+              <div className="ward-report-body">{r.report}</div>
+            </div>
+          ))}
+        </>
+      )}
+    </div>
+  );
+}
+
+// ─── SUPERVISOR 24HR COLLATION ────────────────────────────────────────────────
+function SupervisorCollationSection({ user, wardReports, archives, showToast }) {
+  const [date, setDate] = useState(today());
+  const [shift, setShift] = useState("All Shifts");
+  const [supervisorNote, setSupervisorNote] = useState("");
+  const [archiveTab, setArchiveTab] = useState("collation");
+  const [saving, setSaving] = useState(false);
+
+  const shiftOptions = ["All Shifts", ...SHIFTS];
+
+  // filter reports by date (and optionally shift)
+  const filtered = wardReports.filter(r => {
+    const dateMatch = r.date === date;
+    const shiftMatch = shift === "All Shifts" || r.shift === shift;
+    return dateMatch && shiftMatch;
+  });
+
+  // build ward status: which wards submitted vs missing
+  const submittedWards = new Set(filtered.map(r => r.ward));
+  const missingWards = WARDS.filter(w => !submittedWards.has(w));
+
+  const handleArchive = async () => {
+    if (!supervisorNote.trim()) { showToast("Please write a supervisor note before archiving.", "error"); return; }
+    setSaving(true);
+    try {
+      const archiveData = {
+        id: "AR-" + Math.random().toString(36).slice(2,10),
+        date, shift,
+        supervisorName: user.name,
+        supervisorId: user.uid,
+        supervisorNote: supervisorNote.trim(),
+        wardReports: filtered,
+        totalWards: WARDS.length,
+        submittedWards: filtered.length,
+        missingWards: missingWards,
+        archivedAt: new Date().toISOString(),
+      };
+      await FB.save24hrArchive(archiveData);
+      showToast("Shift collation archived successfully. ✅");
+      setSupervisorNote("");
+    } catch(e) { showToast("Error: " + e.message, "error"); }
+    setSaving(false);
+  };
+
+  return (
+    <div style={{ flex: 1, overflowY: "auto", padding: 18 }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
+        <div>
+          <div className="section-title">👑 24-Hour Ward Collation</div>
+          <div className="section-sub">Review all ward reports and archive at end of shift</div>
+        </div>
+        <div className="tabs-bar" style={{ marginBottom: 0 }}>
+          <button className={`tab-btn ${archiveTab === "collation" ? "active" : ""}`} onClick={() => setArchiveTab("collation")}>📋 Collation</button>
+          <button className={`tab-btn ${archiveTab === "archive" ? "active" : ""}`} onClick={() => setArchiveTab("archive")}>🗄️ Archive</button>
+        </div>
+      </div>
+
+      {archiveTab === "collation" && (
+        <>
+          {/* Filters */}
+          <div className="card" style={{ padding: 14, marginBottom: 16, display: "flex", gap: 12, alignItems: "flex-end", flexWrap: "wrap" }}>
+            <div className="form-group" style={{ marginBottom: 0, flex: 1, minWidth: 150 }}>
+              <label className="form-label">Date</label>
+              <input className="form-input" type="date" value={date} onChange={e => setDate(e.target.value)} />
+            </div>
+            <div className="form-group" style={{ marginBottom: 0, flex: 1, minWidth: 180 }}>
+              <label className="form-label">Shift Filter</label>
+              <select className="form-select" value={shift} onChange={e => setShift(e.target.value)}>
+                {shiftOptions.map(s => <option key={s}>{s}</option>)}
+              </select>
+            </div>
+          </div>
+
+          {/* Summary stats */}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(110px,1fr))", gap: 9, marginBottom: 16 }}>
+            {[
+              ["Total Wards", WARDS.length, "🏥"],
+              ["Submitted", filtered.length, "✅"],
+              ["Missing", missingWards.length, "⚠️"],
+            ].map(([l, v, icon]) => (
+              <div key={l} className="stat-card">
+                <div className="stat-icon">{icon}</div>
+                <div className="stat-label">{l}</div>
+                <div className="stat-value">{v}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* Missing wards alert */}
+          {missingWards.length > 0 && (
+            <div style={{ background: "rgba(251,191,36,.08)", border: "1px solid rgba(251,191,36,.25)", borderRadius: "var(--r)", padding: "10px 14px", marginBottom: 14, fontSize: 12, color: "var(--warning)" }}>
+              ⚠️ <strong>Missing reports:</strong> {missingWards.map(w => w.split("–")[0].trim()).join(", ")}
+            </div>
+          )}
+
+          {/* Ward reports grid */}
+          {filtered.length === 0 ? (
+            <div className="card" style={{ padding: 40, textAlign: "center", color: "var(--t3)" }}>
+              <div style={{ fontSize: 32, marginBottom: 10, opacity: 0.3 }}>📋</div>
+              <div style={{ fontSize: 14, fontWeight: 600, color: "var(--t2)", marginBottom: 4 }}>No ward reports yet</div>
+              <div style={{ fontSize: 12 }}>Ward nurses have not submitted reports for {date}</div>
+            </div>
+          ) : (
+            <div className="collation-grid">
+              {filtered.map(r => (
+                <div key={r.id} className="ward-report-card submitted">
+                  <div className="ward-report-header">
+                    <div>
+                      <div className="ward-report-name">{r.ward}</div>
+                      <div className="ward-report-meta">{r.shift} · {r.nurse} · {r.date}</div>
+                    </div>
+                    <span className="badge badge-active">✅ Submitted</span>
+                  </div>
+                  <div className="ward-report-body">{r.report}</div>
+                </div>
+              ))}
+              {missingWards.map(w => (
+                <div key={w} className="ward-report-card missing">
+                  <div className="ward-report-header">
+                    <div>
+                      <div className="ward-report-name">{w}</div>
+                      <div className="ward-report-meta">No report submitted</div>
+                    </div>
+                    <span className="badge badge-held">⏳ Pending</span>
+                  </div>
+                  <div style={{ fontSize: 12, color: "var(--t3)", fontStyle: "italic", marginTop: 8 }}>Ward nurse has not submitted a report for this shift.</div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Supervisor note & archive */}
+          <div className="supervisor-note-box">
+            <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 4, color: "var(--accent)" }}>👑 Supervisor Review Note</div>
+            <div style={{ fontSize: 11, color: "var(--t2)", marginBottom: 10 }}>
+              Write your end-of-shift note covering overall ward performance, key observations, and satisfaction status.
+            </div>
+            <textarea
+              className="form-textarea"
+              style={{ minHeight: 120, marginBottom: 10 }}
+              value={supervisorNote}
+              onChange={e => setSupervisorNote(e.target.value)}
+              placeholder="e.g. All wards performed satisfactorily during the morning shift. Ward F ICU reported one critical patient stabilised. Ward G Maternity had 2 deliveries. Overall shift handover was smooth. No major incidents recorded…"
+            />
+            <div style={{ display: "flex", justifyContent: "flex-end" }}>
+              <button className="btn btn-primary" onClick={handleArchive} disabled={saving || filtered.length === 0}>
+                {saving ? "Archiving…" : "🗄️ Save to Archive"}
+              </button>
+            </div>
+          </div>
+        </>
+      )}
+
+      {archiveTab === "archive" && (
+        <>
+          <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 12, color: "var(--t2)" }}>
+            🗄️ Archived Shift Reports ({archives.length})
+          </div>
+          {archives.length === 0 ? (
+            <div className="card" style={{ padding: 40, textAlign: "center", color: "var(--t3)" }}>
+              <div style={{ fontSize: 32, marginBottom: 10, opacity: 0.3 }}>🗄️</div>
+              <div style={{ fontSize: 14, fontWeight: 600, color: "var(--t2)", marginBottom: 4 }}>No archives yet</div>
+              <div style={{ fontSize: 12 }}>Archived collations will appear here after you save them.</div>
+            </div>
+          ) : archives.map(a => (
+            <div key={a.id} className="archive-card">
+              <div className="archive-header">
+                <div>
+                  <div className="archive-title">📅 {a.date} — {a.shift}</div>
+                  <div className="archive-meta">
+                    Archived by {a.supervisorName} · {a.submittedWards} of {a.totalWards} wards reported
+                    {a.missingWards?.length > 0 && <span style={{ color: "var(--warning)" }}> · Missing: {a.missingWards.map(w => w.split("–")[0].trim()).join(", ")}</span>}
+                  </div>
+                </div>
+                <span className="badge badge-active" style={{ flexShrink: 0 }}>✅ Archived</span>
+              </div>
+              <div className="archive-note">
+                <div style={{ fontSize: 10, fontWeight: 700, color: "var(--accent)", textTransform: "uppercase", letterSpacing: ".5px", marginBottom: 5 }}>Supervisor Note</div>
+                {a.supervisorNote}
+              </div>
+              {a.wardReports?.length > 0 && (
+                <details style={{ marginTop: 10 }}>
+                  <summary style={{ fontSize: 12, color: "var(--t2)", cursor: "pointer", padding: "4px 0" }}>
+                    📋 View {a.wardReports.length} ward reports
+                  </summary>
+                  <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 8 }}>
+                    {a.wardReports.map(r => (
+                      <div key={r.id} style={{ background: "var(--bg3)", borderRadius: "var(--r-sm)", padding: "10px 12px" }}>
+                        <div style={{ fontWeight: 700, fontSize: 12, marginBottom: 2 }}>{r.ward}</div>
+                        <div style={{ fontSize: 11, color: "var(--t2)", marginBottom: 6 }}>{r.shift} · {r.nurse}</div>
+                        <div style={{ fontSize: 12, whiteSpace: "pre-wrap", lineHeight: 1.5 }}>{r.report}</div>
+                      </div>
+                    ))}
+                  </div>
+                </details>
+              )}
+            </div>
+          ))}
+        </>
+      )}
+    </div>
+  );
+}
+
 // ─── MAIN APP ─────────────────────────────────────────────────────────────────
 function MainApp({ user, onLogout }) {
   const [patients, setPatients] = useState([]);
@@ -1379,6 +1717,8 @@ function MainApp({ user, onLogout }) {
   const [section, setSection] = useState("patients");
   const [overallNurse, setOverallNurse] = useState(null);
   const [allUsers, setAllUsers] = useState([]);
+  const [wardReports, setWardReports] = useState([]);
+  const [archives, setArchives] = useState([]);
   const [darkMode, setDarkMode] = useState(true);
   const [loading, setLoading] = useState(true);
   const [modals, setModals] = useState({});
@@ -1391,8 +1731,10 @@ function MainApp({ user, onLogout }) {
   useEffect(() => {
     const unsubPt = FB.onPatients(pts => { setPatients(pts); setLoading(false); });
     const unsubNurse = FB.onSettings("overallNurse", d => setOverallNurse(d?.name || null));
+    const unsubWR = FB.onWardReports(setWardReports);
+    const unsubAR = FB.on24hrArchives(setArchives);
     FB.getUsers().then(setAllUsers).catch(() => {});
-    return () => { unsubPt(); unsubNurse(); };
+    return () => { unsubPt(); unsubNurse(); unsubWR(); unsubAR(); };
   }, []);
 
   const filtered = patients.filter(p => {
@@ -1443,6 +1785,8 @@ function MainApp({ user, onLogout }) {
           <button className={`nav-btn ${section === "patients" ? "active" : ""}`} onClick={() => setSection("patients")}><span className="ni">🏥</span>Patients</button>
           <button className={`nav-btn ${section === "overview" ? "active" : ""}`} onClick={() => setSection("overview")}><span className="ni">🗺️</span>Ward Overview</button>
           <button className={`nav-btn ${section === "reports" ? "active" : ""}`} onClick={() => setSection("reports")}><span className="ni">📊</span>Reports</button>
+          {user.role === "nurse" && <button className={`nav-btn ${section === "wardreport" ? "active" : ""}`} onClick={() => setSection("wardreport")}><span className="ni">📝</span>Ward Report</button>}
+          {(user.role === "supervisor" || user.role === "wardmaster") && <button className={`nav-btn ${section === "collation" ? "active" : ""}`} onClick={() => setSection("collation")}><span className="ni">👑</span>24hr Collation</button>}
           <button className="nav-btn" onClick={() => openM("overallNurse")}><span className="ni">👑</span>Overall Nurse</button>
           <div className="nav-section">AI Tools</div>
           <button className="nav-btn" onClick={() => openM("aiChat")} style={{ color: "var(--purple)" }}><span className="ni">🤖</span>Ask Claude AI</button>
@@ -1466,9 +1810,9 @@ function MainApp({ user, onLogout }) {
       <div className="main">
         <div className="topbar">
           <div style={{ flexShrink: 0 }}>
-            <div className="tb-title">{section === "overview" ? "Ward Overview" : section === "reports" ? "Reports" : "Patients"}</div>
+            <div className="tb-title">{section === "overview" ? "Ward Overview" : section === "reports" ? "Reports" : section === "wardreport" ? "Ward Report" : section === "collation" ? "24hr Collation" : "Patients"}</div>
             <div className="tb-sub">
-              {section === "patients" ? `${filtered.length} ${filter} patient${filtered.length !== 1 ? "s" : ""}` : section === "overview" ? `${patients.filter(p => (p.status || "active") === "active").length} active` : `${patients.length} total`}
+              {section === "patients" ? `${filtered.length} ${filter} patient${filtered.length !== 1 ? "s" : ""}` : section === "overview" ? `${patients.filter(p => (p.status || "active") === "active").length} active` : section === "wardreport" ? (user.ward || "No ward") : section === "collation" ? `${wardReports.filter(r => r.date === new Date().toISOString().split("T")[0]).length} reports today` : `${patients.length} total`}
             </div>
           </div>
           <GlobalSearch patients={patients} onSelect={handleSelectPatient} />
@@ -1483,6 +1827,8 @@ function MainApp({ user, onLogout }) {
         <div className="content">
           {section === "overview" && <WardOverview patients={patients} onSelectPatient={handleSelectPatient} />}
           {section === "reports" && <ReportsSection patients={patients} user={user} />}
+          {section === "wardreport" && <WardReportSection user={user} wardReports={wardReports} showToast={showToast} />}
+          {section === "collation" && <SupervisorCollationSection user={user} wardReports={wardReports} archives={archives} showToast={showToast} />}
           {section === "patients" && <>
             <div className="pt-panel">
               <div className="pt-panel-header">
