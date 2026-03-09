@@ -888,10 +888,11 @@ function LoginPage({ onLogin }) {
     setBusy(true);
     try {
       const cred = await FB.login(loginData.email, loginData.password);
-      const profile = await FB.getProfile(cred.user.uid);
-      onLogin({ uid: cred.user.uid, email: cred.user.email, ...profile });
-    } catch (e) { showMsg(e.code === "auth/invalid-credential" ? "Incorrect email or password." : e.message); }
-    setBusy(false);
+      onLogin({ uid: cred.user.uid, email: cred.user.email });
+      FB.getProfile(cred.user.uid).then(profile => {
+        if (profile) onLogin(prev => ({ ...prev, ...profile }));
+      }).catch(() => {});
+    } catch (e) { showMsg(e.code === "auth/invalid-credential" ? "Incorrect email or password." : e.message); setBusy(false); }
   };
 
   const doRegister = async () => {
