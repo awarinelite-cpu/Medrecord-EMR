@@ -109,7 +109,7 @@ const css = `
 body{font-family:var(--font);background:var(--bg);color:var(--t1);min-height:100vh}
 input,select,textarea,button{font-family:var(--font)}
 input[type=number]::-webkit-outer-spin-button,input[type=number]::-webkit-inner-spin-button{-webkit-appearance:none}
-.app{display:flex;min-height:100vh}
+.app{display:flex;min-height:100vh}.mobile-back-btn{display:none;align-items:center;gap:6px;padding:8px 14px;margin:10px 12px 0;border:1px solid var(--border2);background:var(--bg3);color:var(--t2);border-radius:var(--r-sm);font-size:12px;cursor:pointer;font-weight:600}.hamburger{display:none;align-items:center;justify-content:center;width:36px;height:36px;border:none;background:none;color:var(--t1);font-size:20px;cursor:pointer;flex-shrink:0;border-radius:var(--r-sm)}.sidebar-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:299}
 .sidebar{width:220px;min-height:100vh;background:var(--bg2);border-right:1px solid var(--border2);display:flex;flex-direction:column;position:fixed;top:0;left:0;bottom:0;z-index:100;overflow-y:auto}
 .main{flex:1;margin-left:220px;display:flex;flex-direction:column;min-height:100vh}
 .topbar{height:58px;background:var(--bg2);border-bottom:1px solid var(--border2);display:flex;align-items:center;justify-content:space-between;padding:0 20px;position:sticky;top:0;z-index:50;gap:10px}
@@ -330,7 +330,7 @@ tr:hover td{background:rgba(45,212,191,.03)}
   .print-footer{margin-top:14pt;font-size:8pt;color:#555;text-align:right;border-top:0.5pt solid #ccc;padding-top:4pt}
   .print-no-report{font-style:italic;font-size:8pt;color:#888;padding:4pt 0}
 }
-@media(max-width:768px){.sidebar{transform:translateX(-100%);transition:transform .25s}.main{margin-left:0}.pt-panel{display:none}.form-row{grid-template-columns:1fr}.vitals-row{grid-template-columns:repeat(3,1fr)}}
+@media(max-width:768px){.sidebar{transform:translateX(-100%);transition:transform .25s;z-index:300}.sidebar.open{transform:translateX(0)}.sidebar-overlay{display:block!important}.main{margin-left:0}.topbar{padding:0 12px;gap:6px}.tb-search{max-width:none;flex:1}.hamburger{display:flex!important}.content{flex-direction:column;height:auto;overflow:visible}.pt-panel{width:100%!important;border-right:none;border-bottom:1px solid var(--border2);max-height:320px;flex-shrink:0}.pt-panel.hidden{display:none}.pt-detail{padding:12px;min-height:60vh}.pt-header{flex-direction:column;gap:8px}.pt-header-actions{flex-wrap:wrap;gap:5px}.pt-header-actions .btn{font-size:11px;padding:5px 9px}.tabs-bar button{font-size:11px;padding:5px 7px}.modal{max-width:100%;margin:0;border-radius:var(--r-lg) var(--r-lg) 0 0;max-height:90vh}.modal-overlay{align-items:flex-end}.form-row{grid-template-columns:1fr}.vitals-row{grid-template-columns:repeat(2,1fr)}.ward-overview{grid-template-columns:1fr;padding:12px}.table-wrap{font-size:11px}.notif-panel{width:100%;top:58px}.badge-live{display:none}.mobile-back-btn{display:flex!important}.login-box{padding:24px 18px}.tb-title{font-size:13px}.tb-sub{font-size:10px}}
 ::-webkit-scrollbar{width:5px;height:5px}
 ::-webkit-scrollbar-track{background:transparent}
 ::-webkit-scrollbar-thumb{background:var(--border2);border-radius:3px}
@@ -887,11 +887,13 @@ function LoginPage({ onLogin }) {
     if (!loginData.email || !loginData.password) { showMsg("Enter your email and password."); return; }
     setBusy(true);
     try {
-      const cred = await FB.login(loginData.email, loginData.password);
-      const profile = await FB.getProfile(cred.user.uid);
-      onLogin({ uid: cred.user.uid, email: cred.user.email, ...profile });
-    } catch (e) { showMsg(e.code === "auth/invalid-credential" ? "Incorrect email or password." : e.message); }
-    setBusy(false);
+      const [cred] = await Promise.all([
+        FB.login(loginData.email, loginData.password),
+        new Promise(r => setTimeout(r, 500)),
+      ]);
+      onLogin({ uid: cred.user.uid, email: cred.user.email });
+      FB.getProfile(cred.user.uid).then(profile => { if (profile) onLogin(prev => ({ ...prev, ...profile })); }).catch(() => {});
+    } catch (e) { showMsg(e.code === "auth/invalid-credential" ? "Incorrect email or password." : e.message); setBusy(false); }
   };
 
   const doRegister = async () => {
@@ -2059,7 +2061,9 @@ function MainApp({ user, onLogout }) {
   const [loading, setLoading] = useState(true);
   const [modals, setModals] = useState({});
   const [notifOpen, setNotifOpen] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const [toastState, showToast] = useToast();
+  const { notifs, unread, markRead } = useNotifications(patients);
   const openM = (m) => setModals(x => ({ ...x, [m]: true }));
   const closeM = (m) => setModals(x => ({ ...x, [m]: false }));
 
@@ -2072,13 +2076,7 @@ function MainApp({ user, onLogout }) {
     return () => { unsubPt(); unsubNurse(); unsubWR(); unsubAR(); };
   }, []);
 
-  const visiblePatients = user.role === "nurse" && user.ward
-    ? patients.filter(p => p.ward === user.ward)
-    : patients;
-
-  const { notifs, unread, markRead } = useNotifications(visiblePatients);
-
-  const filtered = visiblePatients.filter(p => {
+  const filtered = patients.filter(p => {
     if (filter === "active") return (p.status || "active") === "active";
     if (filter === "discharged") return p.status === "discharged";
     return true;
@@ -2112,7 +2110,8 @@ function MainApp({ user, onLogout }) {
       <NotifPanel open={notifOpen} notifs={notifs} unread={unread} onMarkRead={markRead} onClose={() => setNotifOpen(false)} onSelectPatient={handleSelectPatient} />
 
       {/* Sidebar */}
-      <nav className="sidebar">
+      <div className="sidebar-overlay" onClick={() => setSidebarOpen(false)} />
+      <nav className={`sidebar ${sidebarOpen ? "open" : ""}`}>
         <div className="sb-logo">
           <div className="sb-logo-mark">
             <div className="sb-icon">⚕️</div>
@@ -2125,17 +2124,17 @@ function MainApp({ user, onLogout }) {
         </div>
         <div className="sb-nav">
           <div className="nav-section">Clinical</div>
-          <button className={`nav-btn ${section === "patients" ? "active" : ""}`} onClick={() => setSection("patients")}><span className="ni">🏥</span>Patients</button>
-          <button className={`nav-btn ${section === "overview" ? "active" : ""}`} onClick={() => setSection("overview")}><span className="ni">🗺️</span>Ward Overview</button>
-          <button className={`nav-btn ${section === "reports" ? "active" : ""}`} onClick={() => setSection("reports")}><span className="ni">📊</span>Reports</button>
-          {user.role === "nurse" && <button className={`nav-btn ${section === "wardreport" ? "active" : ""}`} onClick={() => setSection("wardreport")}><span className="ni">📝</span>Ward Report</button>}
+          <button className={`nav-btn ${section === "patients" ? "active" : ""}`} onClick={() => { setSection("patients"); setSidebarOpen(false); }}><span className="ni">🏥</span>Patients</button>
+          <button className={`nav-btn ${section === "overview" ? "active" : ""}`} onClick={() => { setSection("overview"); setSidebarOpen(false); }}><span className="ni">🗺️</span>Ward Overview</button>
+          <button className={`nav-btn ${section === "reports" ? "active" : ""}`} onClick={() => { setSection("reports"); setSidebarOpen(false); }}><span className="ni">📊</span>Reports</button>
+          {user.role === "nurse" && <button className={`nav-btn ${section === "wardreport" ? "active" : ""}`} onClick={() => { setSection("wardreport"); setSidebarOpen(false); }}><span className="ni">📝</span>Ward Report</button>}
           {isOverallNurse && (
-            <button className={`nav-btn ${section === "allwardsreport" ? "active" : ""}`} onClick={() => setSection("allwardsreport")} style={{ color: "var(--warning)" }}>
+            <button className={`nav-btn ${section === "allwardsreport" ? "active" : ""}`} onClick={() => { setSection("allwardsreport"); setSidebarOpen(false); }} style={{ color: "var(--warning)" }}>
               <span className="ni">📋</span>24hr Nurses Report
               <span style={{ marginLeft: "auto", background: "var(--warning)", color: "#000", fontSize: 9, fontWeight: 700, borderRadius: 10, padding: "1px 5px" }}>ALL</span>
             </button>
           )}
-          {(user.role === "supervisor" || user.role === "wardmaster") && <button className={`nav-btn ${section === "collation" ? "active" : ""}`} onClick={() => setSection("collation")}><span className="ni">👑</span>24hr Collation</button>}
+          {(user.role === "supervisor" || user.role === "wardmaster") && <button className={`nav-btn ${section === "collation" ? "active" : ""}`} onClick={() => { setSection("collation"); setSidebarOpen(false); }}><span className="ni">👑</span>24hr Collation</button>}
           <button className="nav-btn" onClick={() => openM("overallNurse")}><span className="ni">👑</span>Overall Nurse</button>
           <div className="nav-section">AI Tools</div>
           <button className="nav-btn" onClick={() => openM("aiChat")} style={{ color: "var(--purple)" }}><span className="ni">🤖</span>Ask Claude AI</button>
@@ -2158,13 +2157,14 @@ function MainApp({ user, onLogout }) {
       {/* Main */}
       <div className="main">
         <div className="topbar">
+          <button className="hamburger" onClick={() => setSidebarOpen(o => !o)}>☰</button>
           <div style={{ flexShrink: 0 }}>
             <div className="tb-title">{section === "overview" ? "Ward Overview" : section === "reports" ? "Reports" : section === "wardreport" ? "Ward Report" : section === "collation" ? "24hr Collation" : section === "allwardsreport" ? "24hr Nurses Report" : "Patients"}</div>
             <div className="tb-sub">
-              {section === "patients" ? `${filtered.length} ${filter} patient${filtered.length !== 1 ? "s" : ""}` : section === "overview" ? `${visiblePatients.filter(p => (p.status || "active") === "active").length} active` : section === "wardreport" ? (user.ward || "No ward") : section === "collation" ? `${wardReports.filter(r => r.date === new Date().toISOString().split("T")[0]).length} reports today` : section === "allwardsreport" ? `${WARDS.length} wards · Overall Nurse view` : `${visiblePatients.length} total`}
+              {section === "patients" ? `${filtered.length} ${filter} patient${filtered.length !== 1 ? "s" : ""}` : section === "overview" ? `${patients.filter(p => (p.status || "active") === "active").length} active` : section === "wardreport" ? (user.ward || "No ward") : section === "collation" ? `${wardReports.filter(r => r.date === new Date().toISOString().split("T")[0]).length} reports today` : section === "allwardsreport" ? `${WARDS.length} wards · Overall Nurse view` : `${patients.length} total`}
             </div>
           </div>
-          <GlobalSearch patients={visiblePatients} onSelect={handleSelectPatient} />
+          <GlobalSearch patients={patients} onSelect={handleSelectPatient} />
           <div className="tb-right">
             <span className="badge-live"><span className="badge-dot" />Live</span>
             <button className="btn btn-ghost btn-sm" style={{ position: "relative" }} onClick={() => { setNotifOpen(o => !o); markRead(); }}>
@@ -2174,13 +2174,13 @@ function MainApp({ user, onLogout }) {
         </div>
 
         <div className="content">
-          {section === "overview" && <WardOverview patients={visiblePatients} onSelectPatient={handleSelectPatient} />}
-          {section === "reports" && <ReportsSection patients={visiblePatients} user={user} />}
+          {section === "overview" && <WardOverview patients={patients} onSelectPatient={handleSelectPatient} />}
+          {section === "reports" && <ReportsSection patients={patients} user={user} />}
           {section === "wardreport" && <WardReportSection user={user} wardReports={wardReports} showToast={showToast} />}
           {section === "allwardsreport" && <AllWardsReportSection wardReports={wardReports} archives={archives} user={user} showToast={showToast} />}
           {section === "collation" && <SupervisorCollationSection user={user} wardReports={wardReports} archives={archives} showToast={showToast} />}
           {section === "patients" && <>
-            <div className="pt-panel">
+            <div className={`pt-panel ${selected ? "hidden" : ""}`}>
               <div className="pt-panel-header">
                 <div className="pt-panel-title">Patient List</div>
                 <div className="filter-tabs">
@@ -2214,7 +2214,7 @@ function MainApp({ user, onLogout }) {
               </div>
             </div>
             {selected
-              ? <PatientDetail key={selected.id} patient={selected} user={user} onUpdate={handleUpdatePatient} toast={showToast} />
+              ? <><button onClick={() => setSelectedId(null)} style={{display:"none"}} className="mobile-back-btn">← Back to list</button><PatientDetail key={selected.id} patient={selected} user={user} onUpdate={handleUpdatePatient} toast={showToast} /></>
               : <div className="pt-detail"><div className="empty-state"><div className="empty-icon">📋</div><div className="empty-text">No Patient Selected</div><div className="empty-sub">Select a patient from the list or add a new one.</div></div></div>}
           </>}
         </div>
