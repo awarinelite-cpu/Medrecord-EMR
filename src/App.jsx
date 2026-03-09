@@ -308,7 +308,7 @@ tr:hover td{background:rgba(45,212,191,.03)}
 .shift-report-text{font-size:12px;color:var(--t1);line-height:1.65;white-space:pre-wrap}
 .ward-empty{padding:14px;font-size:12px;color:var(--t3);font-style:italic;text-align:center}
 .theme-light{--bg:#f0f4f8;--bg2:#e4ecf4;--bg3:#d6e2ee;--card:#fff;--card2:#f4f8fb;--t1:#0f2942;--t2:#3d6482;--t3:#6a99b8;--border2:rgba(0,0,0,.08);--border:rgba(45,212,191,.25)}
-@media print{.sidebar,.topbar,.ai-bar,.quick-actions,.btn,button,.tabs-bar,.notif-panel{display:none!important}.main{margin-left:0!important}.pt-detail{padding:0!important}}
+@media print{.sidebar,.topbar,.ai-bar,.quick-actions,.tabs-bar,.notif-panel,.no-print{display:none!important}.main{margin-left:0!important}.pt-detail{padding:0!important}.print-only{display:block!important}.ward-block{break-inside:avoid;border:1px solid #ccc!important;background:#fff!important;color:#000!important;margin-bottom:12px}.ward-block-header{background:#f0f0f0!important;color:#000!important}.shift-report-text,.ward-report-meta,.ward-report-name,.archive-title,.archive-meta,.archive-note{color:#000!important}.all-wards-print-header{display:block!important;text-align:center;border-bottom:2px solid #000;padding-bottom:10px;margin-bottom:16px}}
 @media(max-width:768px){.sidebar{transform:translateX(-100%);transition:transform .25s}.main{margin-left:0}.pt-panel{display:none}.form-row{grid-template-columns:1fr}.vitals-row{grid-template-columns:repeat(3,1fr)}}
 ::-webkit-scrollbar{width:5px;height:5px}
 ::-webkit-scrollbar-track{background:transparent}
@@ -1422,104 +1422,294 @@ function ReportsSection({ patients, user }) {
 }
 
 // ─── ALL WARDS 24HR REPORT (Overall Nurse view) ───────────────────────────────
-function AllWardsReportSection({ wardReports }) {
+function AllWardsReportSection({ wardReports, archives, user, showToast }) {
   const [date, setDate] = useState(today());
+  const [overallNote, setOverallNote] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [tab, setTab] = useState("report"); // "report" | "archive"
+  const [shareOpen, setShareOpen] = useState(false);
+  const printRef = useRef(null);
 
-  // Get all reports for selected date, grouped by ward, sorted alphabetically
   const reportsByWard = WARDS.slice().sort().reduce((acc, ward) => {
-    const reports = wardReports
+    acc[ward] = wardReports
       .filter(r => r.ward === ward && r.date === date)
       .sort((a, b) => a.shift.localeCompare(b.shift));
-    acc[ward] = reports;
     return acc;
   }, {});
 
   const totalSubmitted = Object.values(reportsByWard).filter(r => r.length > 0).length;
   const totalReports = Object.values(reportsByWard).reduce((s, r) => s + r.length, 0);
 
-  const shiftColor = (shift) => {
-    if (shift.startsWith("Morning")) return "var(--warning)";
-    if (shift.startsWith("Afternoon")) return "var(--accent)";
-    return "var(--purple)";
+  const shiftColor = s => s.startsWith("Morning") ? "#fbbf24" : s.startsWith("Afternoon") ? "#2dd4bf" : "#818cf8";
+  const shiftIcon  = s => s.startsWith("Morning") ? "🌅" : s.startsWith("Afternoon") ? "☀️" : "🌙";
+
+  // Build plain-text version of report for sharing
+  const buildReportText = () => {
+    const lines = [];
+    lines.push("══════════════════════════════════════");
+    lines.push("   24-HOUR NURSES REPORT");
+    lines.push(`   Date: ${date}`);
+    lines.push(`   Overall Nurse: ${user.name}`);
+    lines.push(`   Generated: ${new Date().toLocaleString()}`);
+    lines.push("══════════════════════════════════════\n");
+    if (overallNote.trim()) {
+      lines.push("OVERALL NURSE NOTE:");
+      lines.push(overallNote.trim());
+      lines.push("");
+    }
+    WARDS.slice().sort().forEach(ward => {
+      const reports = reportsByWard[ward] || [];
+      lines.push(`──────────────────────────────────────`);
+      lines.push(`🏥 ${ward}`);
+      if (reports.length === 0) {
+        lines.push("   ⏳ No report submitted");
+      } else {
+        reports.forEach(r => {
+          lines.push(`\n   ${shiftIcon(r.shift)} ${r.shift}`);
+          lines.push(`   By: ${r.nurse}`);
+          lines.push(`   ${r.report}`);
+        });
+      }
+      lines.push("");
+    });
+    lines.push("══════════════════════════════════════");
+    return lines.join("\n");
   };
 
-  const shiftIcon = (shift) => {
-    if (shift.startsWith("Morning")) return "🌅";
-    if (shift.startsWith("Afternoon")) return "☀️";
-    return "🌙";
+  // Save to archive
+  const handleArchive = async () => {
+    if (!overallNote.trim()) { showToast("Please write your overall note before archiving.", "error"); return; }
+    setSaving(true);
+    try {
+      await FB.save24hrArchive({
+        id: "AR-" + Math.random().toString(36).slice(2,10),
+        date,
+        type: "overall-nurse",
+        overallNurseName: user.name,
+        overallNurseId: user.uid,
+        overallNote: overallNote.trim(),
+        wardReports: Object.values(reportsByWard).flat(),
+        totalWards: WARDS.length,
+        submittedWards: totalSubmitted,
+        totalReports,
+        archivedAt: new Date().toISOString(),
+      });
+      showToast("Report archived successfully. ✅");
+      setOverallNote("");
+    } catch(e) { showToast("Error: " + e.message, "error"); }
+    setSaving(false);
   };
+
+  // Print
+  const handlePrint = () => window.print();
+
+  // Share via Web Share API (WhatsApp, Bluetooth, Drive, etc.)
+  const handleNativeShare = async () => {
+    const text = buildReportText();
+    if (navigator.share) {
+      try {
+        await navigator.share({ title: `24-Hour Nurses Report – ${date}`, text });
+      } catch(e) { if (e.name !== "AbortError") showToast("Share failed: " + e.message, "error"); }
+    } else {
+      setShareOpen(true);
+    }
+  };
+
+  // Copy to clipboard
+  const handleCopy = () => {
+    navigator.clipboard.writeText(buildReportText())
+      .then(() => showToast("Report copied to clipboard! Paste into WhatsApp, email, or any app."))
+      .catch(() => showToast("Copy failed — try a different share option.", "error"));
+  };
+
+  // Email share
+  const handleEmail = () => {
+    const subject = encodeURIComponent(`24-Hour Nurses Report – ${date}`);
+    const body = encodeURIComponent(buildReportText());
+    window.open(`mailto:?subject=${subject}&body=${body}`);
+  };
+
+  // WhatsApp share
+  const handleWhatsApp = () => {
+    const text = encodeURIComponent(buildReportText());
+    window.open(`https://wa.me/?text=${text}`);
+  };
+
+  // Download as .txt file
+  const handleDownload = () => {
+    const blob = new Blob([buildReportText()], { type: "text/plain" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `24hr-nurses-report-${date}.txt`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  };
+
+  const myArchives = archives.filter(a => a.type === "overall-nurse").slice(0, 30);
 
   return (
-    <div style={{ flex: 1, overflowY: "auto", padding: 18 }}>
+    <div style={{ flex: 1, overflowY: "auto", padding: 18 }} ref={printRef}>
+      {/* Print-only header */}
+      <div className="all-wards-print-header" style={{ display: "none" }}>
+        <div style={{ fontSize: 20, fontWeight: 700 }}>24-HOUR NURSES REPORT</div>
+        <div style={{ fontSize: 13, marginTop: 4 }}>Date: {date} · Overall Nurse: {user.name}</div>
+        <div style={{ fontSize: 11, color: "#666", marginTop: 2 }}>Generated: {new Date().toLocaleString()}</div>
+      </div>
+
       {/* Header */}
-      <div className="all-wards-header">
+      <div className="all-wards-header no-print">
         <div>
-          <div style={{ fontFamily: "var(--display)", fontSize: 18, fontWeight: 700, marginBottom: 4 }}>
-            📋 24-Hour Nurses Report
-          </div>
-          <div style={{ fontSize: 12, color: "var(--t2)" }}>
-            All ward reports for the day · Visible to Overall Nurse only
-          </div>
+          <div style={{ fontFamily: "var(--display)", fontSize: 18, fontWeight: 700, marginBottom: 4 }}>📋 24-Hour Nurses Report</div>
+          <div style={{ fontSize: 12, color: "var(--t2)" }}>All ward reports · Overall Nurse view only</div>
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
           <div>
             <div style={{ fontSize: 9, fontWeight: 700, color: "var(--t3)", textTransform: "uppercase", letterSpacing: ".5px", marginBottom: 3 }}>Date</div>
-            <input className="form-input" type="date" value={date} onChange={e => setDate(e.target.value)} style={{ width: 150, padding: "6px 10px" }} />
+            <input className="form-input" type="date" value={date} onChange={e => setDate(e.target.value)} style={{ width: 148, padding: "6px 10px" }} />
           </div>
         </div>
       </div>
 
-      {/* Summary row */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(100px,1fr))", gap: 9, marginBottom: 18 }}>
-        {[
-          ["Total Wards", WARDS.length, "🏥"],
-          ["Reported", totalSubmitted, "✅"],
-          ["Pending", WARDS.length - totalSubmitted, "⏳"],
-          ["Reports", totalReports, "📝"],
-        ].map(([l, v, icon]) => (
-          <div key={l} className="stat-card">
-            <div className="stat-icon">{icon}</div>
-            <div className="stat-label">{l}</div>
-            <div className="stat-value" style={{ color: l === "Pending" && v > 0 ? "var(--warning)" : "var(--t1)" }}>{v}</div>
-          </div>
-        ))}
+      {/* Tabs */}
+      <div className="tabs-bar no-print">
+        <button className={`tab-btn ${tab === "report" ? "active" : ""}`} onClick={() => setTab("report")}>📋 Report</button>
+        <button className={`tab-btn ${tab === "archive" ? "active" : ""}`} onClick={() => setTab("archive")}>🗄️ Archive ({myArchives.length})</button>
       </div>
 
-      {/* Wards list — alphabetical */}
-      {WARDS.slice().sort().map(ward => {
-        const reports = reportsByWard[ward] || [];
-        const hasReports = reports.length > 0;
-        return (
-          <div key={ward} className="ward-block">
-            <div className="ward-block-header">
-              <div className="ward-block-title">
-                <span style={{ fontSize: 16 }}>🏥</span>
-                <span>{ward}</span>
-              </div>
-              <span className={`badge ${hasReports ? "badge-active" : "badge-held"}`}>
-                {hasReports ? `✅ ${reports.length} report${reports.length > 1 ? "s" : ""}` : "⏳ No report"}
-              </span>
+      {tab === "report" && <>
+        {/* Stats */}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(100px,1fr))", gap: 9, marginBottom: 16 }}>
+          {[["Total Wards", WARDS.length, "🏥"],["Reported", totalSubmitted, "✅"],["Pending", WARDS.length - totalSubmitted, "⏳"],["Reports", totalReports, "📝"]].map(([l,v,icon]) => (
+            <div key={l} className="stat-card">
+              <div className="stat-icon">{icon}</div>
+              <div className="stat-label">{l}</div>
+              <div className="stat-value" style={{ color: l==="Pending"&&v>0?"var(--warning)":"var(--t1)" }}>{v}</div>
             </div>
-            <div className="ward-block-body">
-              {hasReports ? (
-                reports.map(r => (
+          ))}
+        </div>
+
+        {/* Ward blocks */}
+        {WARDS.slice().sort().map(ward => {
+          const reports = reportsByWard[ward] || [];
+          const has = reports.length > 0;
+          return (
+            <div key={ward} className="ward-block">
+              <div className="ward-block-header">
+                <div className="ward-block-title"><span style={{ fontSize: 16 }}>🏥</span><span>{ward}</span></div>
+                <span className={`badge ${has ? "badge-active" : "badge-held"}`}>{has ? `✅ ${reports.length} report${reports.length>1?"s":""}` : "⏳ No report"}</span>
+              </div>
+              <div className="ward-block-body">
+                {has ? reports.map(r => (
                   <div key={r.id} className="shift-report-item" style={{ borderLeftColor: shiftColor(r.shift) }}>
                     <div className="shift-label">
                       <span>{shiftIcon(r.shift)} {r.shift}</span>
-                      <span style={{ color: "var(--t3)", fontWeight: 400, fontSize: 10 }}>
-                        By {r.nurse} · {r.submittedAt ? new Date(r.submittedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "—"}
-                      </span>
+                      <span style={{ color: "var(--t3)", fontWeight: 400, fontSize: 10 }}>By {r.nurse} · {r.submittedAt ? new Date(r.submittedAt).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}) : "—"}</span>
                     </div>
                     <div className="shift-report-text">{r.report}</div>
                   </div>
-                ))
-              ) : (
-                <div className="ward-empty">No report submitted for {date}</div>
+                )) : <div className="ward-empty">No report submitted for {date}</div>}
+              </div>
+            </div>
+          );
+        })}
+
+        {/* Overall Nurse Note + Actions */}
+        <div className="supervisor-note-box">
+          <div style={{ fontWeight: 700, fontSize: 13, color: "var(--warning)", marginBottom: 4 }}>👑 Overall Nurse Note</div>
+          <div style={{ fontSize: 11, color: "var(--t2)", marginBottom: 10 }}>
+            Write a short summary note covering the overall status of all wards for the shift.
+          </div>
+
+          {/* Print-only note display */}
+          <div className="print-only" style={{ display: "none", fontSize: 13, lineHeight: 1.7, marginBottom: 12, whiteSpace: "pre-wrap" }}>
+            <strong>Overall Nurse Note:</strong><br />{overallNote}
+          </div>
+
+          <textarea
+            className="form-textarea no-print"
+            style={{ minHeight: 110, marginBottom: 12 }}
+            value={overallNote}
+            onChange={e => setOverallNote(e.target.value)}
+            placeholder="e.g. All wards have been reviewed. General condition is satisfactory. Two critical patients in ICU are stable. Maternity ward had 3 deliveries. No major incidents. Handover completed smoothly…"
+          />
+
+          {/* Action buttons */}
+          <div className="no-print" style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+            <button className="btn btn-primary" onClick={handleArchive} disabled={saving}>
+              {saving ? "Saving…" : "🗄️ Save to Archive"}
+            </button>
+            <button className="btn btn-ghost btn-sm" onClick={handlePrint}>🖨️ Print</button>
+            <button className="btn btn-ghost btn-sm" onClick={handleNativeShare}>📤 Share</button>
+            <div style={{ position: "relative" }}>
+              <button className="btn btn-secondary btn-sm" onClick={() => setShareOpen(o => !o)}>⋯ More Options</button>
+              {shareOpen && (
+                <div style={{
+                  position: "absolute", bottom: "calc(100% + 8px)", left: 0,
+                  background: "var(--card2)", border: "1px solid var(--border)",
+                  borderRadius: "var(--r)", padding: 6, minWidth: 190, zIndex: 200,
+                  boxShadow: "var(--shadow)"
+                }}>
+                  {[
+                    ["📧 Send via Email", handleEmail],
+                    ["💬 Send via WhatsApp", handleWhatsApp],
+                    ["📋 Copy to Clipboard", handleCopy],
+                    ["💾 Download as .txt", handleDownload],
+                  ].map(([label, fn]) => (
+                    <button key={label} className="btn btn-ghost" style={{ width: "100%", justifyContent: "flex-start", fontSize: 12, marginBottom: 2 }}
+                      onClick={() => { fn(); setShareOpen(false); }}>{label}</button>
+                  ))}
+                  <button className="btn btn-ghost" style={{ width: "100%", justifyContent: "flex-start", fontSize: 12, color: "var(--t3)" }}
+                    onClick={() => setShareOpen(false)}>✕ Close</button>
+                </div>
               )}
             </div>
           </div>
-        );
-      })}
+        </div>
+      </>}
+
+      {tab === "archive" && (
+        <div>
+          {myArchives.length === 0 ? (
+            <div className="card" style={{ padding: 40, textAlign: "center", color: "var(--t3)" }}>
+              <div style={{ fontSize: 32, marginBottom: 10, opacity: 0.3 }}>🗄️</div>
+              <div style={{ fontSize: 14, fontWeight: 600, color: "var(--t2)", marginBottom: 4 }}>No archives yet</div>
+              <div style={{ fontSize: 12 }}>Saved collations will appear here.</div>
+            </div>
+          ) : myArchives.map(a => (
+            <div key={a.id} className="archive-card">
+              <div className="archive-header">
+                <div>
+                  <div className="archive-title">📅 {a.date}</div>
+                  <div className="archive-meta">
+                    By {a.overallNurseName} · {a.submittedWards}/{a.totalWards} wards · {new Date(a.archivedAt).toLocaleString()}
+                  </div>
+                </div>
+                <span className="badge badge-active" style={{ flexShrink: 0 }}>✅ Archived</span>
+              </div>
+              <div className="archive-note">
+                <div style={{ fontSize: 10, fontWeight: 700, color: "var(--warning)", textTransform: "uppercase", letterSpacing: ".5px", marginBottom: 5 }}>Overall Nurse Note</div>
+                {a.overallNote}
+              </div>
+              {a.wardReports?.length > 0 && (
+                <details style={{ marginTop: 10 }}>
+                  <summary style={{ fontSize: 12, color: "var(--t2)", cursor: "pointer", padding: "4px 0" }}>
+                    📋 View {a.wardReports.length} ward reports
+                  </summary>
+                  <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 8 }}>
+                    {a.wardReports.map(r => (
+                      <div key={r.id} style={{ background: "var(--bg3)", borderRadius: "var(--r-sm)", padding: "10px 12px", borderLeft: `3px solid ${shiftColor(r.shift)}` }}>
+                        <div style={{ fontWeight: 700, fontSize: 12, marginBottom: 1 }}>{r.ward}</div>
+                        <div style={{ fontSize: 11, color: "var(--t2)", marginBottom: 5 }}>{shiftIcon(r.shift)} {r.shift} · {r.nurse}</div>
+                        <div style={{ fontSize: 12, whiteSpace: "pre-wrap", lineHeight: 1.55 }}>{r.report}</div>
+                      </div>
+                    ))}
+                  </div>
+                </details>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -1954,7 +2144,7 @@ function MainApp({ user, onLogout }) {
           {section === "overview" && <WardOverview patients={patients} onSelectPatient={handleSelectPatient} />}
           {section === "reports" && <ReportsSection patients={patients} user={user} />}
           {section === "wardreport" && <WardReportSection user={user} wardReports={wardReports} showToast={showToast} />}
-          {section === "allwardsreport" && <AllWardsReportSection wardReports={wardReports} />}
+          {section === "allwardsreport" && <AllWardsReportSection wardReports={wardReports} archives={archives} user={user} showToast={showToast} />}
           {section === "collation" && <SupervisorCollationSection user={user} wardReports={wardReports} archives={archives} showToast={showToast} />}
           {section === "patients" && <>
             <div className="pt-panel">
