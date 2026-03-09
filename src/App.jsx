@@ -422,6 +422,27 @@ function useToast() {
   return [state, show];
 }
 
+// 1-second debounced autosave hook
+function useAutosave(data, saveFn, enabled = true) {
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const timer = useRef(null);
+  const fnRef = useRef(saveFn);
+  fnRef.current = saveFn;
+  useEffect(() => {
+    if (!enabled) return;
+    clearTimeout(timer.current);
+    timer.current = setTimeout(async () => {
+      setSaving(true); setSaved(false);
+      try { await fnRef.current(data); setSaved(true); setTimeout(() => setSaved(false), 2000); }
+      catch (_) {}
+      setSaving(false);
+    }, 1000);
+    return () => clearTimeout(timer.current);
+  }, [JSON.stringify(data), enabled]);
+  return { saving, saved };
+}
+
 // ─── NOTIFICATIONS ────────────────────────────────────────────────────────────
 function useNotifications(patients) {
   const [notifs, setNotifs] = useState([]);
@@ -477,31 +498,47 @@ function NotifPanel({ open, notifs, unread, onMarkRead, onClose, onSelectPatient
 }
 
 // ─── GLOBAL SEARCH ────────────────────────────────────────────────────────────
-function GlobalSearch({ patients, onSelect }) {
+function GlobalSearch({ patients, onSelect, user }) {
   const [q, setQ] = useState("");
   const [open, setOpen] = useState(false);
   const ref = useRef();
+  const isNurse = user?.role === "nurse";
   useEffect(() => {
     const h = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
     document.addEventListener("mousedown", h);
     return () => document.removeEventListener("mousedown", h);
   }, []);
   const results = q.length > 1
-    ? patients.filter(p =>
-      p.name?.toLowerCase().includes(q.toLowerCase()) ||
-      p.emr?.toLowerCase().includes(q.toLowerCase()) ||
-      p.diagnosis?.toLowerCase().includes(q.toLowerCase()) ||
-      p.ward?.toLowerCase().includes(q.toLowerCase())
-    ).slice(0, 8) : [];
+    ? patients.filter(p => {
+        if (isNurse) {
+          // Nurses can only search cross-ward by exact EMR number
+          const emrMatch = p.emr?.toLowerCase() === q.toLowerCase().trim();
+          const sameWard = p.ward === user.ward;
+          return sameWard || emrMatch;
+        }
+        return (
+          p.name?.toLowerCase().includes(q.toLowerCase()) ||
+          p.emr?.toLowerCase().includes(q.toLowerCase()) ||
+          p.diagnosis?.toLowerCase().includes(q.toLowerCase()) ||
+          p.ward?.toLowerCase().includes(q.toLowerCase())
+        );
+      }).slice(0, 8) : [];
   return (
     <div ref={ref} className="tb-search">
       <span style={{ color: "var(--t3)", fontSize: 14, flexShrink: 0 }}>🔍</span>
-      <input placeholder="Search by name, EMR, diagnosis, ward…" value={q} onChange={e => { setQ(e.target.value); setOpen(true); }} onFocus={() => setOpen(true)} />
+      <input
+        placeholder={isNurse ? "Search by name or exact EMR number…" : "Search by name, EMR, diagnosis, ward…"}
+        value={q}
+        onChange={e => { setQ(e.target.value); setOpen(true); }}
+        onFocus={() => setOpen(true)}
+      />
       {q && <button onClick={() => { setQ(""); setOpen(false); }} style={{ background: "none", border: "none", color: "var(--t3)", cursor: "pointer", fontSize: 14 }}>✕</button>}
       {open && q.length > 1 && (
         <div className="search-dropdown">
           {results.length === 0
-            ? <div style={{ padding: "12px 14px", color: "var(--t3)", fontSize: 13 }}>No results for "{q}"</div>
+            ? <div style={{ padding: "12px 14px", color: "var(--t3)", fontSize: 13 }}>
+                {isNurse ? `No patient found. For patients in other wards, enter exact EMR number.` : `No results for "${q}"`}
+              </div>
             : results.map(p => (
               <div key={p.id} className="search-result-item" onClick={() => { onSelect(p.id); setQ(""); setOpen(false); }}>
                 <div style={{ fontWeight: 700, fontSize: 13 }}>{p.name}</div>
@@ -680,22 +717,29 @@ function MedAdminModal({ open, onClose, nurse, onSave }) {
 }
 
 function NursingReportModal({ open, onClose, nurse, onSave }) {
-  const [d, setD] = useState({ date: today(), shift: SHIFTS[0], report: "", nurseOnDuty: "" });
+  const blank = { date: today(), shift: SHIFTS[0], report: "", nurseOnDuty: "" };
+  const [d, setD] = useState(blank);
   const set = (k, v) => setD(x => ({ ...x, [k]: v }));
   useEffect(() => { if (open) setD(x => ({ ...x, nurseOnDuty: nurse || "" })); }, [open, nurse]);
+  const { saving, saved } = useAutosave(d, (val) => val.report.trim() ? onSave({ ...val, _draft: true }) : Promise.resolve(), open && d.report.trim().length > 0);
   const save = () => {
     if (!d.report.trim()) { alert("Report content is required."); return; }
-    onSave(d); setD({ date: today(), shift: SHIFTS[0], report: "", nurseOnDuty: nurse || "" }); onClose();
+    onSave(d); setD(blank); onClose();
   };
   return (
     <Modal open={open} onClose={onClose} title="📝 Nursing Report">
       <div className="modal-body">
+        <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8, fontSize: 11 }}>
+          <span style={{ color: "var(--t3)" }}>Auto-saves as you type</span>
+          {saving && <span style={{ color: "var(--accent)" }}>💾 Saving…</span>}
+          {saved && !saving && <span style={{ color: "var(--success)" }}>✅ Saved</span>}
+        </div>
         <div className="form-row">
           <div className="form-group"><label className="form-label">Date</label><input className="form-input" type="date" value={d.date} onChange={e => set("date", e.target.value)} /></div>
           <div className="form-group"><label className="form-label">Shift</label><select className="form-select" value={d.shift} onChange={e => set("shift", e.target.value)}>{SHIFTS.map(s => <option key={s}>{s}</option>)}</select></div>
         </div>
         <div className="form-group"><label className="form-label">Nurse on Duty</label><input className="form-input" value={d.nurseOnDuty} onChange={e => set("nurseOnDuty", e.target.value)} /></div>
-        <div className="form-group"><label className="form-label">Report *</label><textarea className="form-textarea" style={{ minHeight: 120 }} value={d.report} onChange={e => set("report", e.target.value)} placeholder="Enter nursing report for this shift…" /></div>
+        <div className="form-group"><label className="form-label">Report *</label><textarea className="form-textarea" style={{ minHeight: 120 }} value={d.report} onChange={e => set("report", e.target.value)} placeholder="Enter nursing report for this shift — auto-saves as you type…" /></div>
       </div>
       <div className="modal-footer"><button className="btn btn-ghost" onClick={onClose}>Cancel</button><button className="btn btn-primary" onClick={save}>💾 Save Report</button></div>
     </Modal>
@@ -1433,30 +1477,39 @@ function LabTab({ patient }) {
 }
 
 function OrdersTab({ patient, nurse, onUpdate }) {
-  const rows = patient.doctorOrders || [];
+  // Show all orders newest-first, continuous scroll — all entries always visible
+  const rows = [...(patient.doctorOrders || [])].sort((a,b) => {
+    const da = new Date((a.date||"")+"T"+(a.time||"00:00")), db2 = new Date((b.date||"")+"T"+(b.time||"00:00"));
+    return db2 - da;
+  });
   const toggleAck = async (orderId) => {
-    const updated = { ...patient, doctorOrders: rows.map(o => o.id === orderId ? { ...o, acknowledged: true, acknowledgedBy: nurse, acknowledgedAt: new Date().toISOString() } : o) };
+    const updated = { ...patient, doctorOrders: (patient.doctorOrders||[]).map(o => o.id === orderId ? { ...o, acknowledged: true, acknowledgedBy: nurse, acknowledgedAt: new Date().toISOString() } : o) };
     await FB.savePatient(updated); onUpdate(updated);
   };
   return (
-    <div className="info-card"><h4>Doctor's Orders ({rows.length})</h4>
-      {rows.length === 0 ? <div className="empty-state" style={{ padding: 20 }}><div className="empty-icon">📋</div><div className="empty-text">No orders</div></div> : (
-        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          {rows.map(r => (
-            <div key={r.id} style={{ background: "var(--bg3)", border: `1px solid ${r.priority === "STAT" ? "var(--danger)" : r.priority === "Urgent" ? "var(--warning)" : "var(--border2)"}`, borderRadius: "var(--r-sm)", padding: 11 }}>
+    <div className="info-card">
+      <h4>Doctor's Orders — Full History ({rows.length})</h4>
+      <div style={{ fontSize: 11, color: "var(--t3)", marginBottom: 10 }}>All orders saved continuously. Scroll down to see older entries.</div>
+      {rows.length === 0 ? <div className="empty-state" style={{ padding: 20 }}><div className="empty-icon">📋</div><div className="empty-text">No orders yet</div></div> : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {rows.map((r, idx) => (
+            <div key={r.id || idx} style={{ background: "var(--bg3)", border: `1px solid ${r.priority === "STAT" ? "var(--danger)" : r.priority === "Urgent" ? "var(--warning)" : "var(--border2)"}`, borderRadius: "var(--r-sm)", padding: 12, position: "relative" }}>
+              {idx === 0 && <span style={{ position:"absolute", top:8, right:10, fontSize:9, fontWeight:700, background:"var(--accent)", color:"#000", borderRadius:10, padding:"1px 6px" }}>LATEST</span>}
               <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6, flexWrap: "wrap", gap: 5 }}>
                 <div style={{ display: "flex", gap: 7, alignItems: "center" }}>
                   <span style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--accent)" }}>{r.date} {r.time}</span>
                   <span className={`badge ${r.priority === "STAT" ? "badge-critical" : r.priority === "Urgent" ? "badge-warning" : "badge-active"}`}>{r.priority}</span>
                 </div>
-                <span style={{ fontSize: 11, color: "var(--t2)" }}>Dr. {r.doctor || "—"}</span>
+                <span style={{ fontSize: 11, color: "var(--t2)" }}>Dr. {r.doctor || "—"} {r.nurse ? `· Rec: ${r.nurse}` : ""}</span>
               </div>
-              <p style={{ fontSize: 13, lineHeight: 1.6, marginBottom: 7 }}>{r.order}</p>
+              <p style={{ fontSize: 13, lineHeight: 1.65, marginBottom: 7, whiteSpace:"pre-wrap" }}>{r.order}</p>
+              {r.notes && <div style={{ fontSize:11, color:"var(--t3)", marginBottom:7, fontStyle:"italic" }}>{r.notes}</div>}
               {r.acknowledged
-                ? <div style={{ fontSize: 11, color: "var(--success)" }}>✅ Acknowledged by {r.acknowledgedBy} at {r.acknowledgedAt ? new Date(r.acknowledgedAt).toLocaleTimeString() : "—"}</div>
+                ? <div style={{ fontSize: 11, color: "var(--success)" }}>✅ Acknowledged by {r.acknowledgedBy} · {r.acknowledgedAt ? new Date(r.acknowledgedAt).toLocaleString() : "—"}</div>
                 : <button className="btn btn-secondary btn-sm" onClick={() => toggleAck(r.id)}>✋ Acknowledge Order</button>}
             </div>
           ))}
+          <div style={{ textAlign:"center", padding:"8px 0", fontSize:11, color:"var(--t3)" }}>— End of orders history —</div>
         </div>
       )}
     </div>
@@ -1613,8 +1666,10 @@ function PatientDetail({ patient, user, onUpdate, toast }) {
   };
 
   const save = async (field, entry) => {
+    // Append entry to Firestore array instantly (backend writes every time)
+    await FB.appendToPatient(patient.id, field, entry);
     const updated = { ...patient, [field]: [entry, ...(patient[field] || [])] };
-    await FB.savePatient(updated); refresh(updated);
+    refresh(updated);
   };
   const saveArr = async (field, arr) => {
     const updated = { ...patient, [field]: arr };
@@ -1734,7 +1789,15 @@ function PatientDetail({ patient, user, onUpdate, toast }) {
       <FluidModal open={!!modals.fluid} onClose={() => closeM("fluid")} nurse={user?.name} onSave={async f => { await save("fluidEntries", { ...f, id: uid() }); toast("Fluid entry saved."); }} />
       <MedAdminModal open={!!modals.medAdmin} onClose={() => closeM("medAdmin")} nurse={user?.name} onSave={async e => { await save("medAdminLogs", { ...e, id: uid() }); toast("Administration recorded."); }} />
       <PrescriptionModal open={!!modals.prescription} onClose={() => closeM("prescription")} patient={patient} onSave={async list => { await saveArr("prescriptions", list); toast("Prescriptions saved."); }} />
-      <NursingReportModal open={!!modals.nursing} onClose={() => closeM("nursing")} nurse={user?.name} onSave={async rp => { await save("nursingReports", { ...rp, id: uid() }); toast("Nursing report saved."); }} />
+      <NursingReportModal open={!!modals.nursing} onClose={() => closeM("nursing")} nurse={user?.name} onSave={async rp => {
+        const entryId = rp.id || uid();
+        const existing = patient.nursingReports || [];
+        const alreadyExists = existing.some(e => e.id === entryId);
+        const entry = { ...rp, id: entryId };
+        const updated = { ...patient, nursingReports: alreadyExists ? existing.map(e => e.id === entryId ? entry : e) : [entry, ...existing] };
+        await FB.savePatient(updated); refresh(updated);
+        if (!rp._draft) toast("Nursing report saved.");
+      }} />
       <WoundCareModal open={!!modals.wound} onClose={() => closeM("wound")} nurse={user?.name} onSave={async w => { await save("woundRecords", { ...w, id: uid() }); toast("Wound record saved."); }} />
       <LabResultModal open={!!modals.lab} onClose={() => closeM("lab")} nurse={user?.name} onSave={async l => { await save("labResults", { ...l, id: uid() }); toast("Lab result saved."); }} />
       <DoctorOrderModal open={!!modals.doctorOrder} onClose={() => closeM("doctorOrder")} nurse={user?.name} onSave={async o => { await save("doctorOrders", { ...o, id: uid() }); toast("Order saved."); }} />
@@ -2497,15 +2560,25 @@ function MainApp({ user, onLogout }) {
     return () => { unsubPt(); unsubNurse(); unsubWR(); unsubAR(); };
   }, []);
 
-  const filtered = patients.filter(p => {
+  // Role helpers — isOverallNurse must come first
+  const isOverallNurse = !!(overallNurse?.uid && overallNurse.uid === user.uid);
+  const isNurse = user.role === "nurse";
+  const canSeeAllWards = user.role === "supervisor" || user.role === "wardmaster" || isOverallNurse;
+  const roleLabel = user.role === "wardmaster" ? "Ward Master" : user.role === "supervisor" ? "Supervisor / CNS" : "Ward Nurse";
+
+  // Nurses see only their ward patients in the list; others see all
+  const wardPatients = isNurse && !canSeeAllWards
+    ? patients.filter(p => p.ward === user.ward)
+    : patients;
+
+  const filtered = wardPatients.filter(p => {
     if (filter === "active") return (p.status || "active") === "active";
     if (filter === "discharged") return p.status === "discharged";
     return true;
   });
+
+  // selected: always look in ALL patients (so EMR cross-ward search works for nurses)
   const selected = patients.find(p => p.id === selectedId) || null;
-  const roleLabel = user.role === "wardmaster" ? "Ward Master" : user.role === "supervisor" ? "Supervisor" : "Ward Nurse";
-  // true when the currently logged-in user is the assigned overall nurse of the day
-  const isOverallNurse = !!(overallNurse?.uid && overallNurse.uid === user.uid);
 
   const handleAddPatient = async (data) => {
     const patient = {
@@ -2523,7 +2596,10 @@ function MainApp({ user, onLogout }) {
     setPatients(ps => ps.map(p => p.id === updated.id ? updated : p));
   };
 
-  const handleSelectPatient = (id) => { setSelectedId(id); setSection("patients"); };
+  const handleSelectPatient = (id) => {
+    setSelectedId(id);
+    setSection("patients");
+  };
 
   return (
     <div className={`app ${darkMode ? "" : "theme-light"}`}>
@@ -2546,8 +2622,8 @@ function MainApp({ user, onLogout }) {
         <div className="sb-nav">
           <div className="nav-section">Clinical</div>
           <button className={`nav-btn ${section === "patients" ? "active" : ""}`} onClick={() => setSection("patients")}><span className="ni">🏥</span>Patients</button>
-          <button className={`nav-btn ${section === "overview" ? "active" : ""}`} onClick={() => setSection("overview")}><span className="ni">🗺️</span>Ward Overview</button>
-          <button className={`nav-btn ${section === "reports" ? "active" : ""}`} onClick={() => setSection("reports")}><span className="ni">📊</span>Reports</button>
+          {(user.role === "supervisor" || user.role === "wardmaster" || isOverallNurse) && <button className={`nav-btn ${section === "overview" ? "active" : ""}`} onClick={() => setSection("overview")}><span className="ni">🗺️</span>Ward Overview</button>}
+          {(user.role === "supervisor" || user.role === "wardmaster" || isOverallNurse) && <button className={`nav-btn ${section === "reports" ? "active" : ""}`} onClick={() => setSection("reports")}><span className="ni">📊</span>Reports</button>}
           {user.role === "nurse" && <button className={`nav-btn ${section === "wardreport" ? "active" : ""}`} onClick={() => setSection("wardreport")}><span className="ni">📝</span>Ward Report</button>}
           {isOverallNurse && (
             <button className={`nav-btn ${section === "allwardsreport" ? "active" : ""}`} onClick={() => setSection("allwardsreport")} style={{ color: "var(--warning)" }}>
@@ -2584,7 +2660,7 @@ function MainApp({ user, onLogout }) {
               {section === "patients" ? `${filtered.length} ${filter} patient${filtered.length !== 1 ? "s" : ""}` : section === "overview" ? `${patients.filter(p => (p.status || "active") === "active").length} active` : section === "wardreport" ? (user.ward || "No ward") : section === "collation" ? `${wardReports.filter(r => r.date === new Date().toISOString().split("T")[0]).length} reports today` : section === "allwardsreport" ? `${WARDS.length} wards · Overall Nurse view` : `${patients.length} total`}
             </div>
           </div>
-          <GlobalSearch patients={patients} onSelect={handleSelectPatient} />
+          <GlobalSearch patients={patients} onSelect={handleSelectPatient} user={user} />
           <div className="tb-right">
             <span className="badge-live"><span className="badge-dot" />Live</span>
             <button className="btn btn-ghost btn-sm" style={{ position: "relative" }} onClick={() => { setNotifOpen(o => !o); markRead(); }}>
@@ -2602,7 +2678,10 @@ function MainApp({ user, onLogout }) {
           {section === "patients" && <>
             <div className="pt-panel">
               <div className="pt-panel-header">
-                <div className="pt-panel-title">Patient List</div>
+                <div className="pt-panel-title">
+                  {isNurse && user.ward ? `${user.ward.split("–")[0]?.trim()} Patients` : "Patient List"}
+                  {isNurse && user.ward && <div style={{fontSize:9,color:"var(--t3)",fontWeight:400,marginTop:1}}>Your ward only · Search EMR to view others</div>}
+                </div>
                 <div className="filter-tabs">
                   {[["active", "Active"], ["all", "All"], ["discharged", "D/C"]].map(([f, l]) => (
                     <button key={f} className={`filter-tab ${filter === f ? "active" : ""}`} onClick={() => setFilter(f)}>{l}</button>
@@ -2613,29 +2692,39 @@ function MainApp({ user, onLogout }) {
               <div className="pt-list">
                 {loading
                   ? <div style={{ textAlign: "center", padding: 20, color: "var(--t3)" }}>Loading patients…</div>
-                  : filtered.length === 0
-                    ? <div style={{ textAlign: "center", padding: "26px 10px", color: "var(--t3)", fontSize: 12 }}><div style={{ fontSize: 22, marginBottom: 5, opacity: 0.3 }}>📋</div>{filter === "active" ? "No active patients." : "No patients found."}</div>
-                    : filtered.map(p => {
-                      const hasCritical = checkVitalAlerts(p.vitals?.[0] || {}).some(a => a.level === "critical");
-                      return (
-                        <div key={p.id} className={`pt-card ${selectedId === p.id ? "active" : ""}`} onClick={() => setSelectedId(p.id)}>
-                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-                            <div className="pt-name">{p.name}</div>
-                            {hasCritical && <span style={{ fontSize: 12, color: "var(--danger)" }}>⚠️</span>}
-                          </div>
-                          <div className="pt-meta">
-                            <span>{p.ward?.split("–")[0]?.trim() || "—"}</span>
-                            <span className={`badge badge-${p.status || "active"}`}>{p.status || "Active"}</span>
-                          </div>
-                          <div style={{ fontSize: 10, color: "var(--t3)", marginTop: 2 }}>EMR: {p.emr || "—"} · {p.diagnosis || "No diagnosis"}</div>
-                        </div>
-                      );
-                    })}
+                  : <>
+                    {isNurse && !canSeeAllWards && <div style={{ padding: "7px 10px", fontSize: 11, color: "var(--t3)", borderBottom: "1px solid var(--border2)", background: "var(--bg3)" }}>🏥 {user.ward || "Your ward"}</div>}
+                    {filtered.length === 0
+                      ? <div style={{ textAlign: "center", padding: "26px 10px", color: "var(--t3)", fontSize: 12 }}><div style={{ fontSize: 22, marginBottom: 5, opacity: 0.3 }}>📋</div>{filter === "active" ? "No active patients." : "No patients found."}</div>
+                      : filtered.map(p => {
+                          const hasCritical = checkVitalAlerts(p.vitals?.[0] || {}).some(a => a.level === "critical");
+                          return (
+                            <div key={p.id} className={`pt-card ${selectedId === p.id ? "active" : ""}`} onClick={() => setSelectedId(p.id)}>
+                              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                                <div className="pt-name">{p.name}</div>
+                                {hasCritical && <span style={{ fontSize: 12, color: "var(--danger)" }}>⚠️</span>}
+                              </div>
+                              <div className="pt-meta">
+                                <span>{p.ward?.split("–")[0]?.trim() || "—"}</span>
+                                <span className={`badge badge-${p.status || "active"}`}>{p.status || "Active"}</span>
+                              </div>
+                              <div style={{ fontSize: 10, color: "var(--t3)", marginTop: 2 }}>EMR: {p.emr || "—"} · {p.diagnosis || "No diagnosis"}</div>
+                            </div>
+                          );
+                        })}
+                  </>}
               </div>
             </div>
             {selected
-              ? <PatientDetail key={selected.id} patient={selected} user={user} onUpdate={handleUpdatePatient} toast={showToast} />
-              : <div className="pt-detail"><div className="empty-state"><div className="empty-icon">📋</div><div className="empty-text">No Patient Selected</div><div className="empty-sub">Select a patient from the list or add a new one.</div></div></div>}
+              ? <>
+                  {searchSelectedId === selected.id && (
+                    <div style={{ background: "rgba(251,191,36,.1)", border: "1px solid rgba(251,191,36,.3)", borderRadius: "var(--r)", padding: "8px 14px", marginBottom: 10, fontSize: 12, color: "var(--warning)", display: "flex", alignItems: "center", gap: 8 }}>
+                      🔍 Viewing patient from <strong style={{marginLeft:4}}>{selected.ward}</strong>&nbsp;— found via EMR search
+                    </div>
+                  )}
+                  <PatientDetail key={selected.id} patient={selected} user={user} onUpdate={handleUpdatePatient} toast={showToast} />
+                </>
+              : <div className="pt-detail"><div className="empty-state"><div className="empty-icon">📋</div><div className="empty-text">No Patient Selected</div><div className="empty-sub">{isNurse && !canSeeAllWards ? "Select a patient from your ward, or search by EMR number to view any patient." : "Select a patient from the list or add a new one."}</div></div></div>}
           </>}
         </div>
       </div>
