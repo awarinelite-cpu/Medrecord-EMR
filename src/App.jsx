@@ -89,7 +89,7 @@ function calcNEWS2(v) {
   if (breakdown.length === 0) return null;
   const risk = score<=4?"low":score<=6?"medium":"high";
   const label = score<=4?"Low Risk":score<=6?"Medium Risk":"High Risk — Urgent Review";
-  const action = score<=4?"Continue routine monitoring":"Increase monitoring frequency, notify senior nurse":"Immediate escalation to physician required";
+  const action = score<=4?"Continue routine monitoring":score<=6?"Increase monitoring frequency, notify senior nurse":"Immediate escalation to physician required";
   return { score, risk, label, action, breakdown };
 }
 
