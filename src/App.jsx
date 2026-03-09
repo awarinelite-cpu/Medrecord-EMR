@@ -2060,7 +2060,6 @@ function MainApp({ user, onLogout }) {
   const [modals, setModals] = useState({});
   const [notifOpen, setNotifOpen] = useState(false);
   const [toastState, showToast] = useToast();
-  const { notifs, unread, markRead } = useNotifications(patients);
   const openM = (m) => setModals(x => ({ ...x, [m]: true }));
   const closeM = (m) => setModals(x => ({ ...x, [m]: false }));
 
@@ -2073,7 +2072,13 @@ function MainApp({ user, onLogout }) {
     return () => { unsubPt(); unsubNurse(); unsubWR(); unsubAR(); };
   }, []);
 
-  const filtered = patients.filter(p => {
+  const visiblePatients = user.role === "nurse" && user.ward
+    ? patients.filter(p => p.ward === user.ward)
+    : patients;
+
+  const { notifs, unread, markRead } = useNotifications(visiblePatients);
+
+  const filtered = visiblePatients.filter(p => {
     if (filter === "active") return (p.status || "active") === "active";
     if (filter === "discharged") return p.status === "discharged";
     return true;
@@ -2156,10 +2161,10 @@ function MainApp({ user, onLogout }) {
           <div style={{ flexShrink: 0 }}>
             <div className="tb-title">{section === "overview" ? "Ward Overview" : section === "reports" ? "Reports" : section === "wardreport" ? "Ward Report" : section === "collation" ? "24hr Collation" : section === "allwardsreport" ? "24hr Nurses Report" : "Patients"}</div>
             <div className="tb-sub">
-              {section === "patients" ? `${filtered.length} ${filter} patient${filtered.length !== 1 ? "s" : ""}` : section === "overview" ? `${patients.filter(p => (p.status || "active") === "active").length} active` : section === "wardreport" ? (user.ward || "No ward") : section === "collation" ? `${wardReports.filter(r => r.date === new Date().toISOString().split("T")[0]).length} reports today` : section === "allwardsreport" ? `${WARDS.length} wards · Overall Nurse view` : `${patients.length} total`}
+              {section === "patients" ? `${filtered.length} ${filter} patient${filtered.length !== 1 ? "s" : ""}` : section === "overview" ? `${visiblePatients.filter(p => (p.status || "active") === "active").length} active` : section === "wardreport" ? (user.ward || "No ward") : section === "collation" ? `${wardReports.filter(r => r.date === new Date().toISOString().split("T")[0]).length} reports today` : section === "allwardsreport" ? `${WARDS.length} wards · Overall Nurse view` : `${visiblePatients.length} total`}
             </div>
           </div>
-          <GlobalSearch patients={patients} onSelect={handleSelectPatient} />
+          <GlobalSearch patients={visiblePatients} onSelect={handleSelectPatient} />
           <div className="tb-right">
             <span className="badge-live"><span className="badge-dot" />Live</span>
             <button className="btn btn-ghost btn-sm" style={{ position: "relative" }} onClick={() => { setNotifOpen(o => !o); markRead(); }}>
@@ -2169,8 +2174,8 @@ function MainApp({ user, onLogout }) {
         </div>
 
         <div className="content">
-          {section === "overview" && <WardOverview patients={patients} onSelectPatient={handleSelectPatient} />}
-          {section === "reports" && <ReportsSection patients={patients} user={user} />}
+          {section === "overview" && <WardOverview patients={visiblePatients} onSelectPatient={handleSelectPatient} />}
+          {section === "reports" && <ReportsSection patients={visiblePatients} user={user} />}
           {section === "wardreport" && <WardReportSection user={user} wardReports={wardReports} showToast={showToast} />}
           {section === "allwardsreport" && <AllWardsReportSection wardReports={wardReports} archives={archives} user={user} showToast={showToast} />}
           {section === "collation" && <SupervisorCollationSection user={user} wardReports={wardReports} archives={archives} showToast={showToast} />}
