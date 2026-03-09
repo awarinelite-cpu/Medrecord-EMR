@@ -489,12 +489,7 @@ function LoginPage({ onLogin }) {
             <button className="btn btn-primary btn-lg" style={{marginTop:16}} onClick={doLogin} disabled={busy}>
               {busy ? <Spinner /> : "Sign In"}
             </button>
-            <div style={{marginTop:12,paddingTop:12,borderTop:"1px solid var(--border2)",textAlign:"center"}}>
-              <button className="btn btn-lg" style={{background:"linear-gradient(135deg,#34d399,#059669)",color:"#000",fontWeight:700}} onClick={demoLogin}>
-                ⚡ Quick Demo Login
-              </button>
-              <p style={{fontSize:11,color:"var(--t3)",marginTop:8}}>No registration needed — full access immediately</p>
-            </div>
+
           </>
         )}
 
