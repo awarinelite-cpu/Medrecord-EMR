@@ -1,4 +1,56 @@
 import { useState, useEffect, useCallback, useRef } from "react";
+import { initializeApp } from "firebase/app";
+import {
+  getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword,
+  signOut, onAuthStateChanged, sendPasswordResetEmail
+} from "firebase/auth";
+import {
+  getFirestore, doc, setDoc, getDoc, collection,
+  onSnapshot, updateDoc, serverTimestamp, query, orderBy
+} from "firebase/firestore";
+
+// ─── FIREBASE ─────────────────────────────────────────────────────────────────
+const firebaseConfig = {
+  apiKey: "AIzaSyD91f4UJKPXZEpfXV_QoggsZq1R_9WcC4s",
+  authDomain: "the-elites-nurses.firebaseapp.com",
+  projectId: "the-elites-nurses",
+  storageBucket: "the-elites-nurses.firebasestorage.app",
+  messagingSenderId: "44425476386",
+  appId: "1:44425476386:web:98be1e3e6a34c403eccd7b",
+  measurementId: "G-T4BELKJMZR"
+};
+const firebaseApp = initializeApp(firebaseConfig);
+const auth = getAuth(firebaseApp);
+const db = getFirestore(firebaseApp);
+
+// ─── FIREBASE HELPERS ─────────────────────────────────────────────────────────
+const FB = {
+  // Auth
+  register: async (email, password, profile) => {
+    const cred = await createUserWithEmailAndPassword(auth, email, password);
+    await setDoc(doc(db, "users", cred.user.uid), {
+      ...profile, uid: cred.user.uid, email, createdAt: serverTimestamp()
+    });
+    return { uid: cred.user.uid, email, ...profile };
+  },
+  login: (email, password) => signInWithEmailAndPassword(auth, email, password),
+  logout: () => signOut(auth),
+  forgotPassword: (email) => sendPasswordResetEmail(auth, email),
+  onAuth: (cb) => onAuthStateChanged(auth, cb),
+  getProfile: async (uid) => {
+    const snap = await getDoc(doc(db, "users", uid));
+    return snap.exists() ? snap.data() : null;
+  },
+  // Patients
+  savePatient: async (patient) => {
+    await setDoc(doc(db, "patients", patient.id), { ...patient, updatedAt: serverTimestamp() });
+  },
+  onPatients: (cb) => {
+    const q = query(collection(db, "patients"), orderBy("createdAt", "desc"));
+    return onSnapshot(q, snap => cb(snap.docs.map(d => d.data())));
+  },
+};
+
 
 // ─── CONSTANTS ────────────────────────────────────────────────────────────────
 const WARDS = [
@@ -17,102 +69,8 @@ const today = () => new Date().toISOString().split("T")[0];
 const nowTime = () => new Date().toTimeString().slice(0,5);
 const uid = () => Math.random().toString(36).slice(2,10);
 
-// ─── IN-MEMORY STORE ──────────────────────────────────────────────────────────
-const Store = (() => {
-  let users = [];
-  let patients = [];
-  let session = null;
-  let overallNurse = null;
-  return {
-    registerUser: (d) => {
-      if (users.find(u=>u.username===d.username)) return {ok:false,error:"Username already taken."};
-      const u = {...d, id:uid(), createdAt:new Date().toISOString()};
-      users.push(u);
-      return {ok:true, user:{id:u.id,name:u.name,username:u.username,role:u.role,ward:u.ward}};
-    },
-    loginUser: (username, password) => {
-      const u = users.find(u=>u.username===username);
-      if (!u) return {ok:false, error:"User not found."};
-      if (u.password!==password) return {ok:false, error:"Incorrect password."};
-      session = {id:u.id,name:u.name,username:u.username,role:u.role,ward:u.ward};
-      return {ok:true, user:session};
-    },
-    getSession: () => session,
-    logout: () => { session=null; },
-    getUsers: () => users.map(u=>({id:u.id,name:u.name,username:u.username,role:u.role,ward:u.ward})),
-    getPatients: () => patients,
-    getPatient: (id) => patients.find(p=>p.id===id)||null,
-    createPatient: (d) => {
-      const p = {
-        id:"PT-"+uid(), status:"active", createdAt:new Date().toISOString(),
-        vitals:[], medAdminLogs:[], glucoseReadings:[], fluidEntries:[],
-        prescriptions:[], nursingReports:[], statusHistory:[], transfusions:[],
-        ...d,
-      };
-      patients.push(p);
-      return {ok:true, patient:p};
-    },
-    updatePatient: (id, data) => {
-      const i = patients.findIndex(p=>p.id===id);
-      if (i===-1) return {ok:false};
-      patients[i] = {...patients[i], ...data, updatedAt:new Date().toISOString()};
-      return {ok:true, patient:patients[i]};
-    },
-    addVitals: (id, v) => {
-      const p = patients.find(p=>p.id===id);
-      if (!p) return {ok:false};
-      p.vitals = [{...v,id:uid(),recordedAt:new Date().toISOString()}, ...p.vitals];
-      return {ok:true, patient:p};
-    },
-    addGlucose: (id, r) => {
-      const p = patients.find(p=>p.id===id);
-      if (!p) return {ok:false};
-      p.glucoseReadings = [{...r,id:uid()}, ...p.glucoseReadings];
-      return {ok:true, patient:p};
-    },
-    addFluid: (id, e) => {
-      const p = patients.find(p=>p.id===id);
-      if (!p) return {ok:false};
-      p.fluidEntries = [{...e,id:uid()}, ...p.fluidEntries];
-      return {ok:true, patient:p};
-    },
-    addMedAdmin: (id, e) => {
-      const p = patients.find(p=>p.id===id);
-      if (!p) return {ok:false};
-      p.medAdminLogs = [{...e,id:uid()}, ...p.medAdminLogs];
-      return {ok:true, patient:p};
-    },
-    savePrescriptions: (id, list) => {
-      const p = patients.find(p=>p.id===id);
-      if (!p) return {ok:false};
-      p.prescriptions = list;
-      return {ok:true, patient:p};
-    },
-    addNursingReport: (id, r) => {
-      const p = patients.find(p=>p.id===id);
-      if (!p) return {ok:false};
-      p.nursingReports = [...p.nursingReports,{...r,id:uid()}];
-      return {ok:true, patient:p};
-    },
-    addTransfusion: (id, r) => {
-      const p = patients.find(p=>p.id===id);
-      if (!p) return {ok:false};
-      p.transfusions = [{...r,id:uid()}, ...(p.transfusions||[])];
-      return {ok:true, patient:p};
-    },
-    applyStatus: (id, action, ward, notes, date) => {
-      const p = patients.find(p=>p.id===id);
-      if (!p) return {ok:false};
-      const entry = {action,date,notes,id:uid()};
-      if (action==="discharge") p.status="discharged";
-      else if (action==="transfer" && ward) { p.ward=ward; entry.toWard=ward; }
-      p.statusHistory = [...(p.statusHistory||[]), entry];
-      return {ok:true, patient:p};
-    },
-    setOverallNurse: (name) => { overallNurse=name; return name; },
-    getOverallNurse: () => overallNurse,
-  };
-})();
+// ─── FIREBASE BACKEND (see firebase.js) ─────────────────────────────────────
+
 
 // ─── AI CLIENT ────────────────────────────────────────────────────────────────
 const AI = {
@@ -431,35 +389,57 @@ function Spinner() {
 // ─── LOGIN PAGE ───────────────────────────────────────────────────────────────
 function LoginPage({ onLogin }) {
   const [tab, setTab] = useState("login");
-  const [loginData, setLoginData] = useState({ username:"", password:"" });
-  const [regData, setRegData] = useState({ name:"", username:"", password:"", role:"", ward:"" });
+  const [loginData, setLoginData] = useState({ email:"", password:"" });
+  const [regData, setRegData] = useState({ name:"", email:"", password:"", confirmPassword:"", role:"", ward:"" });
+  const [fpEmail, setFpEmail] = useState("");
   const [msg, setMsg] = useState(null);
   const [busy, setBusy] = useState(false);
 
   const showMsg = (text, type="error") => setMsg({ text, type });
+  const switchTab = (t) => { setTab(t); setMsg(null); };
 
-  const doLogin = () => {
-    if (!loginData.username || !loginData.password) { showMsg("Enter username and password."); return; }
+  const doLogin = async () => {
+    if (!loginData.email || !loginData.password) { showMsg("Enter your email and password."); return; }
     setBusy(true);
-    const r = Store.loginUser(loginData.username, loginData.password);
+    try {
+      const cred = await FB.login(loginData.email, loginData.password);
+      const profile = await FB.getProfile(cred.user.uid);
+      onLogin({ uid: cred.user.uid, email: cred.user.email, ...profile });
+    } catch(e) {
+      showMsg(e.code === "auth/invalid-credential" ? "Incorrect email or password." : e.message);
+    }
     setBusy(false);
-    if (r.ok) onLogin(r.user);
-    else showMsg(r.error);
   };
 
-  const doRegister = () => {
-    if (!regData.name || !regData.username || !regData.password || !regData.role) { showMsg("Fill in all required fields."); return; }
-    const r = Store.registerUser(regData);
-    if (!r.ok) { showMsg(r.error); return; }
-    showMsg("Account created! You can now log in.", "success");
-    setTab("login");
-    setLoginData({ username: regData.username, password: regData.password });
+  const doRegister = async () => {
+    if (!regData.name || !regData.email || !regData.password || !regData.role) { showMsg("Fill in all required fields."); return; }
+    if (regData.password !== regData.confirmPassword) { showMsg("Passwords do not match."); return; }
+    if (regData.password.length < 6) { showMsg("Password must be at least 6 characters."); return; }
+    setBusy(true);
+    try {
+      const profile = { name: regData.name, role: regData.role, ward: regData.ward||"" };
+      await FB.register(regData.email, regData.password, profile);
+      showMsg("Account created! You can now sign in.", "success");
+      switchTab("login");
+      setLoginData({ email: regData.email, password: "" });
+    } catch(e) {
+      showMsg(e.code === "auth/email-already-in-use" ? "That email is already registered." : e.message);
+    }
+    setBusy(false);
   };
 
-  const demoLogin = () => {
-    const demo = { id:"demo", name:"Demo Nurse", username:"demo", role:"supervisor", ward:"" };
-    Store.registerUser({ ...demo, password:"demo" });
-    onLogin(Store.loginUser("demo","demo").user);
+  const doForgotPassword = async () => {
+    if (!fpEmail) { showMsg("Enter your email address."); return; }
+    setBusy(true);
+    try {
+      await FB.forgotPassword(fpEmail);
+      showMsg("Password reset email sent! Check your inbox.", "success");
+      setFpEmail("");
+      setTimeout(() => switchTab("login"), 3000);
+    } catch(e) {
+      showMsg(e.code === "auth/user-not-found" ? "No account found with that email." : e.message);
+    }
+    setBusy(false);
   };
 
   return (
@@ -471,15 +451,16 @@ function LoginPage({ onLogin }) {
           <div className="login-sub">Hospital Electronic Medical Records</div>
         </div>
         <div className="tab-switcher">
-          <button className={`tab-switch-btn ${tab==="login"?"active":""}`} onClick={()=>{setTab("login");setMsg(null)}}>Sign In</button>
-          <button className={`tab-switch-btn ${tab==="register"?"active":""}`} onClick={()=>{setTab("register");setMsg(null)}}>Register</button>
+          <button className={`tab-switch-btn ${tab==="login"?"active":""}`} onClick={()=>switchTab("login")}>Sign In</button>
+          <button className={`tab-switch-btn ${tab==="register"?"active":""}`} onClick={()=>switchTab("register")}>Register</button>
+          <button className={`tab-switch-btn ${tab==="forgot"?"active":""}`} onClick={()=>switchTab("forgot")}>Forgot Password</button>
         </div>
 
         {tab==="login" && (
           <>
             <div className="form-group">
-              <label className="form-label">Username</label>
-              <input className="form-input" placeholder="Enter username" value={loginData.username} onChange={e=>setLoginData(d=>({...d,username:e.target.value}))} onKeyDown={e=>e.key==="Enter"&&doLogin()} />
+              <label className="form-label">Email Address</label>
+              <input className="form-input" type="email" placeholder="your@email.com" value={loginData.email} onChange={e=>setLoginData(d=>({...d,email:e.target.value}))} onKeyDown={e=>e.key==="Enter"&&doLogin()} />
             </div>
             <div className="form-group">
               <label className="form-label">Password</label>
@@ -489,7 +470,26 @@ function LoginPage({ onLogin }) {
             <button className="btn btn-primary btn-lg" style={{marginTop:16}} onClick={doLogin} disabled={busy}>
               {busy ? <Spinner /> : "Sign In"}
             </button>
+            <div style={{textAlign:"center",marginTop:12}}>
+              <button onClick={()=>switchTab("forgot")} style={{background:"none",border:"none",color:"var(--accent)",fontSize:12,cursor:"pointer",textDecoration:"underline"}}>Forgot password?</button>
+            </div>
+          </>
+        )}
 
+        {tab==="forgot" && (
+          <>
+            <p style={{fontSize:13,color:"var(--t2)",marginBottom:16}}>Enter your email and we will send you a password reset link.</p>
+            <div className="form-group">
+              <label className="form-label">Email Address *</label>
+              <input className="form-input" type="email" placeholder="your@email.com" value={fpEmail} onChange={e=>setFpEmail(e.target.value)} onKeyDown={e=>e.key==="Enter"&&doForgotPassword()} />
+            </div>
+            {msg && <div className={msg.type==="error"?"form-error":"form-success"}>{msg.text}</div>}
+            <button className="btn btn-primary btn-lg" style={{marginTop:8}} onClick={doForgotPassword} disabled={busy}>
+              {busy ? <Spinner /> : "Send Reset Link"}
+            </button>
+            <div style={{textAlign:"center",marginTop:12}}>
+              <button onClick={()=>switchTab("login")} style={{background:"none",border:"none",color:"var(--t2)",fontSize:12,cursor:"pointer",textDecoration:"underline"}}>Back to Sign In</button>
+            </div>
           </>
         )}
 
@@ -500,12 +500,16 @@ function LoginPage({ onLogin }) {
               <input className="form-input" placeholder="Your full name" value={regData.name} onChange={e=>setRegData(d=>({...d,name:e.target.value}))} />
             </div>
             <div className="form-group">
-              <label className="form-label">Username *</label>
-              <input className="form-input" placeholder="Choose a username" value={regData.username} onChange={e=>setRegData(d=>({...d,username:e.target.value}))} />
+              <label className="form-label">Email Address *</label>
+              <input className="form-input" type="email" placeholder="your@email.com" value={regData.email} onChange={e=>setRegData(d=>({...d,email:e.target.value}))} />
             </div>
             <div className="form-group">
               <label className="form-label">Password *</label>
-              <input className="form-input" type="password" placeholder="Choose a password" value={regData.password} onChange={e=>setRegData(d=>({...d,password:e.target.value}))} />
+              <input className="form-input" type="password" placeholder="Min 6 characters" value={regData.password} onChange={e=>setRegData(d=>({...d,password:e.target.value}))} />
+            </div>
+            <div className="form-group">
+              <label className="form-label">Confirm Password *</label>
+              <input className="form-input" type="password" placeholder="Repeat password" value={regData.confirmPassword} onChange={e=>setRegData(d=>({...d,confirmPassword:e.target.value}))} />
             </div>
             <div className="form-group">
               <label className="form-label">Role *</label>
@@ -524,7 +528,9 @@ function LoginPage({ onLogin }) {
               </div>
             )}
             {msg && <div className={msg.type==="error"?"form-error":"form-success"}>{msg.text}</div>}
-            <button className="btn btn-primary btn-lg" style={{marginTop:8}} onClick={doRegister}>Create Account</button>
+            <button className="btn btn-primary btn-lg" style={{marginTop:8}} onClick={doRegister} disabled={busy}>
+              {busy ? <Spinner /> : "Create Account"}
+            </button>
           </>
         )}
       </div>
@@ -539,8 +545,7 @@ function AddPatientModal({ open, onClose, onSave, user }) {
   const set = (k,v) => setD(x=>({...x,[k]:v}));
   const save = () => {
     if (!d.name || !d.emr || !d.ward) { alert("Name, EMR, and Ward are required."); return; }
-    const r = Store.createPatient({ ...d, createdBy: user?.name||"—" });
-    if (r.ok) { onSave(r.patient); setD(blank); onClose(); }
+    onSave({ ...d }); setD(blank); onClose();
   };
   return (
     <Modal open={open} onClose={onClose} title="Add New Patient">
@@ -1127,7 +1132,7 @@ function PatientDetail({ patient, user, onUpdate, toast }) {
   const openM = (m) => setModals(x=>({...x,[m]:true}));
   const closeM = (m) => setModals(x=>({...x,[m]:false}));
 
-  const refresh = (r) => onUpdate(r.patient);
+  const refresh = (updated) => onUpdate(updated);
 
   const runAI = async (title, fn) => {
     setAiResult({ open:true, title, content:"", loading:true });
@@ -1219,15 +1224,15 @@ function PatientDetail({ patient, user, onUpdate, toast }) {
       {activeTab==="transfusion" && <TransfusionTab patient={patient} />}
 
       {/* Modals */}
-      <VitalsModal open={!!modals.vitals} onClose={()=>closeM("vitals")} nurse={user?.name} onSave={v=>{ const r=Store.addVitals(patient.id,v); if(r.ok){refresh(r);toast("Vital signs saved.");} }} />
-      <GlucoseModal open={!!modals.glucose} onClose={()=>closeM("glucose")} nurse={user?.name} onSave={g=>{ const r=Store.addGlucose(patient.id,g); if(r.ok){refresh(r);toast("Glucose reading saved.");} }} />
-      <FluidModal open={!!modals.fluid} onClose={()=>closeM("fluid")} nurse={user?.name} onSave={f=>{ const r=Store.addFluid(patient.id,f); if(r.ok){refresh(r);toast("Fluid entry saved.");} }} />
-      <MedAdminModal open={!!modals.medAdmin} onClose={()=>closeM("medAdmin")} patient={patient} nurse={user?.name} onSave={e=>{ const r=Store.addMedAdmin(patient.id,e); if(r.ok){refresh(r);toast("Administration recorded.");} }} />
-      <PrescriptionModal open={!!modals.prescription} onClose={()=>closeM("prescription")} patient={patient} onSave={list=>{ const r=Store.savePrescriptions(patient.id,list); if(r.ok){refresh(r);toast("Prescriptions saved.");} }} />
-      <NursingReportModal open={!!modals.nursing} onClose={()=>closeM("nursing")} patient={patient} nurse={user?.name} onSave={rp=>{ const r=Store.addNursingReport(patient.id,rp); if(r.ok){refresh(r);toast("Nursing report saved.");} }} />
+      <VitalsModal open={!!modals.vitals} onClose={()=>closeM("vitals")} nurse={user?.name} onSave={async v=>{ const entry={...v,id:uid(),nurse:user?.name||"—",recordedAt:new Date().toISOString()}; const updated={...patient,vitals:[entry,...(patient.vitals||[])]}; await FB.savePatient(updated); refresh(updated); toast("Vital signs saved."); }} />
+      <GlucoseModal open={!!modals.glucose} onClose={()=>closeM("glucose")} nurse={user?.name} onSave={async g=>{ const entry={...g,id:uid(),nurse:user?.name||"—"}; const updated={...patient,glucoseReadings:[entry,...(patient.glucoseReadings||[])]}; await FB.savePatient(updated); refresh(updated); toast("Glucose reading saved."); }} />
+      <FluidModal open={!!modals.fluid} onClose={()=>closeM("fluid")} nurse={user?.name} onSave={async f=>{ const entry={...f,id:uid(),nurse:user?.name||"—"}; const updated={...patient,fluidEntries:[entry,...(patient.fluidEntries||[])]}; await FB.savePatient(updated); refresh(updated); toast("Fluid entry saved."); }} />
+      <MedAdminModal open={!!modals.medAdmin} onClose={()=>closeM("medAdmin")} patient={patient} nurse={user?.name} onSave={async e=>{ const entry={...e,id:uid(),nurse:user?.name||"—"}; const updated={...patient,medAdminLogs:[entry,...(patient.medAdminLogs||[])]}; await FB.savePatient(updated); refresh(updated); toast("Administration recorded."); }} />
+      <PrescriptionModal open={!!modals.prescription} onClose={()=>closeM("prescription")} patient={patient} onSave={async list=>{ const updated={...patient,prescriptions:list}; await FB.savePatient(updated); refresh(updated); toast("Prescriptions saved."); }} />
+      <NursingReportModal open={!!modals.nursing} onClose={()=>closeM("nursing")} patient={patient} nurse={user?.name} onSave={async rp=>{ const entry={...rp,id:uid()}; const updated={...patient,nursingReports:[...(patient.nursingReports||[]),entry]}; await FB.savePatient(updated); refresh(updated); toast("Nursing report saved."); }} />
       <DailyCareModal open={!!modals.dailyCare} onClose={()=>closeM("dailyCare")} patient={patient} nurse={user?.name} onSave={()=>toast("Daily care report saved.")} />
-      <TransfusionModal open={!!modals.transfusion} onClose={()=>closeM("transfusion")} nurse={user?.name} onSave={t=>{ const r=Store.addTransfusion(patient.id,t); if(r.ok){refresh(r);toast("Transfusion record saved.");} }} />
-      <StatusModal open={!!modals.status} onClose={()=>closeM("status")} patient={patient} onSave={(action,ward,notes,date)=>{ const r=Store.applyStatus(patient.id,action,ward,notes,date); if(r.ok){refresh(r);toast("Status updated.");} }} />
+      <TransfusionModal open={!!modals.transfusion} onClose={()=>closeM("transfusion")} nurse={user?.name} onSave={async t=>{ const entry={...t,id:uid(),nurse:user?.name||"—"}; const updated={...patient,transfusions:[entry,...(patient.transfusions||[])]}; await FB.savePatient(updated); refresh(updated); toast("Transfusion record saved."); }} />
+      <StatusModal open={!!modals.status} onClose={()=>closeM("status")} patient={patient} onSave={async (action,ward,notes,date)=>{ const entry={action,date,notes,id:uid(),...(action==="transfer"&&ward?{toWard:ward}:{})}; const newStatus=action==="discharge"?"discharged":action==="active"?"active":patient.status; const updated={...patient,status:newStatus,...(action==="transfer"&&ward?{ward}:{}),statusHistory:[...(patient.statusHistory||[]),entry]}; await FB.savePatient(updated); refresh(updated); toast("Status updated."); }} />
       <AIResultModal open={aiResult.open} onClose={()=>setAiResult(x=>({...x,open:false}))} title={aiResult.title} content={aiResult.content} loading={aiResult.loading} />
     </div>
   );
@@ -1290,10 +1295,18 @@ function MainApp({ user, onLogout }) {
   const [filter, setFilter] = useState("active");
   const [section, setSection] = useState("patients");
   const [overallNurse, setOverallNurse] = useState(null);
+  const [allUsers, setAllUsers] = useState([]);
+  const [loading, setLoading] = useState(true);
   const [modals, setModals] = useState({});
   const [toastState, showToast] = useToast();
   const openM = (m) => setModals(x=>({...x,[m]:true}));
   const closeM = (m) => setModals(x=>({...x,[m]:false}));
+
+  // Real-time Firestore patient sync
+  useEffect(() => {
+    const unsub = FB.onPatients(pts => { setPatients(pts); setLoading(false); });
+    return () => unsub();
+  }, []);
 
   const filtered = patients.filter(p => {
     if (filter==="active") return (p.status||"active")==="active";
@@ -1303,14 +1316,24 @@ function MainApp({ user, onLogout }) {
 
   const selected = patients.find(p=>p.id===selectedId)||null;
 
-  const handleAddPatient = (p) => {
-    setPatients(ps=>[...ps, p]);
-    setSelectedId(p.id);
-    showToast("Patient added.");
+  const handleAddPatient = async (data) => {
+    const patient = {
+      id: "PT-" + uid(), status: "active",
+      createdAt: new Date().toISOString(), createdBy: user?.name||"—",
+      vitals:[], medAdminLogs:[], glucoseReadings:[], fluidEntries:[],
+      prescriptions:[], nursingReports:[], statusHistory:[], transfusions:[],
+      ...data,
+    };
+    try {
+      await FB.savePatient(patient);
+      setSelectedId(patient.id);
+      showToast("Patient added.");
+    } catch(e) { showToast("Error: "+e.message, "error"); }
   };
 
-  const handleUpdatePatient = (updated) => {
+  const handleUpdatePatient = async (updated) => {
     setPatients(ps=>ps.map(p=>p.id===updated.id?updated:p));
+    try { await FB.savePatient(updated); } catch(e) { console.error(e); }
   };
 
   const roleLabel = user.role==="wardmaster"?"Ward Master":user.role==="supervisor"?"Supervisor":"Ward Nurse";
@@ -1421,9 +1444,15 @@ function MainApp({ user, onLogout }) {
       <AddPatientModal open={!!modals.addPatient} onClose={()=>closeM("addPatient")} onSave={handleAddPatient} user={user} />
       <OverallNurseModal
         open={!!modals.overallNurse} onClose={()=>closeM("overallNurse")}
-        users={Store.getUsers()} overallNurse={overallNurse}
-        onAssign={n=>{ Store.setOverallNurse(n); setOverallNurse(n); showToast(n+" assigned as Overall Nurse."); closeM("overallNurse"); }}
-        onEnd={()=>{ Store.setOverallNurse(null); setOverallNurse(null); showToast("Shift ended."); closeM("overallNurse"); }}
+        users={allUsers} overallNurse={overallNurse}
+        onAssign={async n=>{ 
+          try { await setDoc(doc(db,"settings","overallNurse"),{name:n,updatedAt:serverTimestamp()}); } catch(e){}
+          setOverallNurse(n); showToast(n+" assigned as Overall Nurse."); closeM("overallNurse"); 
+        }}
+        onEnd={async ()=>{ 
+          try { await setDoc(doc(db,"settings","overallNurse"),{name:null,updatedAt:serverTimestamp()}); } catch(e){}
+          setOverallNurse(null); showToast("Shift ended."); closeM("overallNurse"); 
+        }}
       />
       <AIChatModal open={!!modals.aiChat} onClose={()=>closeM("aiChat")} />
     </div>
@@ -1433,6 +1462,32 @@ function MainApp({ user, onLogout }) {
 // ─── ROOT ─────────────────────────────────────────────────────────────────────
 export default function App() {
   const [user, setUser] = useState(null);
+  const [checking, setChecking] = useState(true);
+
+  useEffect(() => {
+    const unsub = FB.onAuth(async (firebaseUser) => {
+      if (firebaseUser) {
+        const profile = await FB.getProfile(firebaseUser.uid);
+        setUser(profile ? { uid: firebaseUser.uid, email: firebaseUser.email, ...profile } : null);
+      } else {
+        setUser(null);
+      }
+      setChecking(false);
+    });
+    return () => unsub();
+  }, []);
+
+  if (checking) {
+    return (
+      <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:"var(--bg)"}}>
+        <style>{css}</style>
+        <div style={{textAlign:"center",color:"var(--t2)"}}>
+          <div style={{fontSize:36,marginBottom:12}}>⚕️</div>
+          <div style={{fontSize:14,fontWeight:600}}>Loading MedRecord…</div>
+        </div>
+      </div>
+    );
+  }
 
   if (!user) {
     return (
@@ -1443,5 +1498,5 @@ export default function App() {
     );
   }
 
-  return <MainApp user={user} onLogout={()=>{ Store.logout(); setUser(null); }} />;
+  return <MainApp user={user} onLogout={async ()=>{ await FB.logout(); setUser(null); }} />;
 }
