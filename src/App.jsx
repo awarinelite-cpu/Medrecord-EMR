@@ -73,6 +73,26 @@ function checkVitalAlerts(v) {
   return a;
 }
 
+function calcNEWS2(v) {
+  if (!v) return null;
+  let score = 0; const breakdown = [];
+  const rr = +v.rr;
+  if (!isNaN(rr) && rr > 0) { const pts = rr<=8?3:rr<=11?1:rr<=20?0:rr<=24?2:3; score+=pts; breakdown.push({label:"Resp Rate",val:`${rr}/min`,pts}); }
+  const spo2 = +v.spo2;
+  if (!isNaN(spo2) && spo2 > 0) { const pts = spo2<=91?3:spo2<=93?2:spo2<=95?1:0; score+=pts; breakdown.push({label:"SpO₂",val:`${spo2}%`,pts}); }
+  const [sys] = (v.bp||"").split("/"); const sbp = +sys;
+  if (!isNaN(sbp) && sbp > 0) { const pts = sbp<=90?3:sbp<=100?2:sbp<=110?1:sbp<=219?0:3; score+=pts; breakdown.push({label:"Sys BP",val:`${sbp}mmHg`,pts}); }
+  const hr = +v.hr;
+  if (!isNaN(hr) && hr > 0) { const pts = hr<=40?3:hr<=50?1:hr<=90?0:hr<=110?1:hr<=130?2:3; score+=pts; breakdown.push({label:"Heart Rate",val:`${hr}bpm`,pts}); }
+  const temp = +v.temp;
+  if (!isNaN(temp) && temp > 0) { const pts = temp<=35?3:temp<=36?1:temp<=38?0:temp<=39?1:2; score+=pts; breakdown.push({label:"Temp",val:`${temp}°C`,pts}); }
+  if (breakdown.length === 0) return null;
+  const risk = score<=4?"low":score<=6?"medium":"high";
+  const label = score<=4?"Low Risk":score<=6?"Medium Risk":"High Risk — Urgent Review";
+  const action = score<=4?"Continue routine monitoring":score<=6?"Increase monitoring frequency, notify senior nurse":"Immediate escalation to physician required";
+  return { score, risk, label, action, breakdown };
+}
+
 const AI = {
   async call(system, user, maxTokens=800) {
     const res = await fetch("https://api.anthropic.com/v1/messages", {
@@ -109,7 +129,7 @@ const css = `
 body{font-family:var(--font);background:var(--bg);color:var(--t1);min-height:100vh}
 input,select,textarea,button{font-family:var(--font)}
 input[type=number]::-webkit-outer-spin-button,input[type=number]::-webkit-inner-spin-button{-webkit-appearance:none}
-.app{display:flex;min-height:100vh}.mobile-back-btn{display:none;align-items:center;gap:6px;padding:8px 14px;margin:10px 12px 0;border:1px solid var(--border2);background:var(--bg3);color:var(--t2);border-radius:var(--r-sm);font-size:12px;cursor:pointer;font-weight:600}.hamburger{display:none;align-items:center;justify-content:center;width:36px;height:36px;border:none;background:none;color:var(--t1);font-size:20px;cursor:pointer;flex-shrink:0;border-radius:var(--r-sm)}.sidebar-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:299}
+.app{display:flex;min-height:100vh}
 .sidebar{width:220px;min-height:100vh;background:var(--bg2);border-right:1px solid var(--border2);display:flex;flex-direction:column;position:fixed;top:0;left:0;bottom:0;z-index:100;overflow-y:auto}
 .main{flex:1;margin-left:220px;display:flex;flex-direction:column;min-height:100vh}
 .topbar{height:58px;background:var(--bg2);border-bottom:1px solid var(--border2);display:flex;align-items:center;justify-content:space-between;padding:0 20px;position:sticky;top:0;z-index:50;gap:10px}
@@ -308,6 +328,35 @@ tr:hover td{background:rgba(45,212,191,.03)}
 .shift-report-text{font-size:12px;color:var(--t1);line-height:1.65;white-space:pre-wrap}
 .ward-empty{padding:14px;font-size:12px;color:var(--t3);font-style:italic;text-align:center}
 .theme-light{--bg:#f0f4f8;--bg2:#e4ecf4;--bg3:#d6e2ee;--card:#fff;--card2:#f4f8fb;--t1:#0f2942;--t2:#3d6482;--t3:#6a99b8;--border2:rgba(0,0,0,.08);--border:rgba(45,212,191,.25)}
+.news2-bar{display:flex;align-items:center;gap:10px;padding:10px 14px;border-radius:var(--r);margin-bottom:12px;border:1px solid}
+.news2-low{background:rgba(52,211,153,.08);border-color:rgba(52,211,153,.3);color:var(--success)}
+.news2-med{background:rgba(251,191,36,.08);border-color:rgba(251,191,36,.3);color:var(--warning)}
+.news2-high{background:rgba(248,113,113,.12);border-color:rgba(248,113,113,.3);color:var(--danger)}
+.news2-score{font-family:var(--mono);font-size:22px;font-weight:700;min-width:36px;text-align:center}
+.news2-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:6px;margin-top:8px}
+.news2-item{background:var(--bg3);border-radius:var(--r-sm);padding:6px 9px;font-size:11px}
+.news2-item-label{color:var(--t3);font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.4px}
+.news2-item-val{font-weight:700;font-size:13px;margin-top:1px}
+.news2-item-pts{font-size:9px;color:var(--t3)}
+.clinical-section{background:var(--card);border:1px solid var(--border2);border-radius:var(--r-lg);padding:14px 16px;margin-bottom:12px}
+.clinical-section-title{font-weight:700;font-size:13px;margin-bottom:10px;display:flex;align-items:center;gap:7px}
+.checklist-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.checklist-item{display:flex;align-items:flex-start;gap:8px;padding:7px 9px;background:var(--bg3);border-radius:var(--r-sm);cursor:pointer;border:1px solid transparent;transition:all .15s}
+.checklist-item.checked{background:rgba(52,211,153,.08);border-color:rgba(52,211,153,.25)}
+.checklist-item input[type=checkbox]{margin-top:1px;accent-color:var(--accent);flex-shrink:0}
+.checklist-label{font-size:12px;font-weight:500}
+.checklist-sub{font-size:10px;color:var(--t3);margin-top:1px}
+.risk-badge{display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border-radius:20px;font-size:11px;font-weight:700;margin-left:8px}
+.risk-low{background:rgba(52,211,153,.12);color:var(--success)}
+.risk-med{background:rgba(251,191,36,.12);color:var(--warning)}
+.risk-high{background:rgba(248,113,113,.12);color:var(--danger)}
+.incident-card{background:var(--card);border:1px solid var(--border2);border-radius:var(--r);padding:12px 14px;margin-bottom:8px;border-left:3px solid var(--t3)}
+.incident-card.critical{border-left-color:var(--danger)}
+.incident-card.high{border-left-color:var(--warning)}
+.incident-card.medium{border-left-color:#fb923c}
+.incident-card.low{border-left-color:var(--success)}
+.incident-type{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--t3)}
+.discharge-section{border-top:1px solid var(--border2);padding-top:12px;margin-top:12px}
 @media print{
   .sidebar,.topbar,.ai-bar,.quick-actions,.tabs-bar,.notif-panel,.no-print{display:none!important}
   .main{margin-left:0!important}
@@ -330,7 +379,7 @@ tr:hover td{background:rgba(45,212,191,.03)}
   .print-footer{margin-top:14pt;font-size:8pt;color:#555;text-align:right;border-top:0.5pt solid #ccc;padding-top:4pt}
   .print-no-report{font-style:italic;font-size:8pt;color:#888;padding:4pt 0}
 }
-@media(max-width:768px){.sidebar{transform:translateX(-100%);transition:transform .25s;z-index:300}.sidebar.open{transform:translateX(0)}.sidebar-overlay{display:block!important}.main{margin-left:0}.topbar{padding:0 12px;gap:6px}.tb-search{max-width:none;flex:1}.hamburger{display:flex!important}.content{flex-direction:column;height:auto;overflow:visible}.pt-panel{width:100%!important;border-right:none;border-bottom:1px solid var(--border2);max-height:320px;flex-shrink:0}.pt-panel.hidden{display:none}.pt-detail{padding:12px;min-height:60vh}.pt-header{flex-direction:column;gap:8px}.pt-header-actions{flex-wrap:wrap;gap:5px}.pt-header-actions .btn{font-size:11px;padding:5px 9px}.tabs-bar button{font-size:11px;padding:5px 7px}.modal{max-width:100%;margin:0;border-radius:var(--r-lg) var(--r-lg) 0 0;max-height:90vh}.modal-overlay{align-items:flex-end}.form-row{grid-template-columns:1fr}.vitals-row{grid-template-columns:repeat(2,1fr)}.ward-overview{grid-template-columns:1fr;padding:12px}.table-wrap{font-size:11px}.notif-panel{width:100%;top:58px}.badge-live{display:none}.mobile-back-btn{display:flex!important}.login-box{padding:24px 18px}.tb-title{font-size:13px}.tb-sub{font-size:10px}}
+@media(max-width:768px){.sidebar{transform:translateX(-100%);transition:transform .25s}.main{margin-left:0}.pt-panel{display:none}.form-row{grid-template-columns:1fr}.vitals-row{grid-template-columns:repeat(3,1fr)}}
 ::-webkit-scrollbar{width:5px;height:5px}
 ::-webkit-scrollbar-track{background:transparent}
 ::-webkit-scrollbar-thumb{background:var(--border2);border-radius:3px}
@@ -371,6 +420,27 @@ function useToast() {
     setTimeout(() => setState(s => s.msg === msg ? { ...s, msg: "" } : s), 3500);
   }, []);
   return [state, show];
+}
+
+// 1-second debounced autosave hook
+function useAutosave(data, saveFn, enabled = true) {
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const timer = useRef(null);
+  const fnRef = useRef(saveFn);
+  fnRef.current = saveFn;
+  useEffect(() => {
+    if (!enabled) return;
+    clearTimeout(timer.current);
+    timer.current = setTimeout(async () => {
+      setSaving(true); setSaved(false);
+      try { await fnRef.current(data); setSaved(true); setTimeout(() => setSaved(false), 2000); }
+      catch (_) {}
+      setSaving(false);
+    }, 1000);
+    return () => clearTimeout(timer.current);
+  }, [JSON.stringify(data), enabled]);
+  return { saving, saved };
 }
 
 // ─── NOTIFICATIONS ────────────────────────────────────────────────────────────
@@ -428,31 +498,47 @@ function NotifPanel({ open, notifs, unread, onMarkRead, onClose, onSelectPatient
 }
 
 // ─── GLOBAL SEARCH ────────────────────────────────────────────────────────────
-function GlobalSearch({ patients, onSelect }) {
+function GlobalSearch({ patients, onSelect, user }) {
   const [q, setQ] = useState("");
   const [open, setOpen] = useState(false);
   const ref = useRef();
+  const isNurse = user?.role === "nurse";
   useEffect(() => {
     const h = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
     document.addEventListener("mousedown", h);
     return () => document.removeEventListener("mousedown", h);
   }, []);
   const results = q.length > 1
-    ? patients.filter(p =>
-      p.name?.toLowerCase().includes(q.toLowerCase()) ||
-      p.emr?.toLowerCase().includes(q.toLowerCase()) ||
-      p.diagnosis?.toLowerCase().includes(q.toLowerCase()) ||
-      p.ward?.toLowerCase().includes(q.toLowerCase())
-    ).slice(0, 8) : [];
+    ? patients.filter(p => {
+        if (isNurse) {
+          // Nurses can only search cross-ward by exact EMR number
+          const emrMatch = p.emr?.toLowerCase() === q.toLowerCase().trim();
+          const sameWard = p.ward === user.ward;
+          return sameWard || emrMatch;
+        }
+        return (
+          p.name?.toLowerCase().includes(q.toLowerCase()) ||
+          p.emr?.toLowerCase().includes(q.toLowerCase()) ||
+          p.diagnosis?.toLowerCase().includes(q.toLowerCase()) ||
+          p.ward?.toLowerCase().includes(q.toLowerCase())
+        );
+      }).slice(0, 8) : [];
   return (
     <div ref={ref} className="tb-search">
       <span style={{ color: "var(--t3)", fontSize: 14, flexShrink: 0 }}>🔍</span>
-      <input placeholder="Search by name, EMR, diagnosis, ward…" value={q} onChange={e => { setQ(e.target.value); setOpen(true); }} onFocus={() => setOpen(true)} />
+      <input
+        placeholder={isNurse ? "Search by name or exact EMR number…" : "Search by name, EMR, diagnosis, ward…"}
+        value={q}
+        onChange={e => { setQ(e.target.value); setOpen(true); }}
+        onFocus={() => setOpen(true)}
+      />
       {q && <button onClick={() => { setQ(""); setOpen(false); }} style={{ background: "none", border: "none", color: "var(--t3)", cursor: "pointer", fontSize: 14 }}>✕</button>}
       {open && q.length > 1 && (
         <div className="search-dropdown">
           {results.length === 0
-            ? <div style={{ padding: "12px 14px", color: "var(--t3)", fontSize: 13 }}>No results for "{q}"</div>
+            ? <div style={{ padding: "12px 14px", color: "var(--t3)", fontSize: 13 }}>
+                {isNurse ? `No patient found. For patients in other wards, enter exact EMR number.` : `No results for "${q}"`}
+              </div>
             : results.map(p => (
               <div key={p.id} className="search-result-item" onClick={() => { onSelect(p.id); setQ(""); setOpen(false); }}>
                 <div style={{ fontWeight: 700, fontSize: 13 }}>{p.name}</div>
@@ -631,22 +717,29 @@ function MedAdminModal({ open, onClose, nurse, onSave }) {
 }
 
 function NursingReportModal({ open, onClose, nurse, onSave }) {
-  const [d, setD] = useState({ date: today(), shift: SHIFTS[0], report: "", nurseOnDuty: "" });
+  const blank = { date: today(), shift: SHIFTS[0], report: "", nurseOnDuty: "" };
+  const [d, setD] = useState(blank);
   const set = (k, v) => setD(x => ({ ...x, [k]: v }));
   useEffect(() => { if (open) setD(x => ({ ...x, nurseOnDuty: nurse || "" })); }, [open, nurse]);
+  const { saving, saved } = useAutosave(d, (val) => val.report.trim() ? onSave({ ...val, _draft: true }) : Promise.resolve(), open && d.report.trim().length > 0);
   const save = () => {
     if (!d.report.trim()) { alert("Report content is required."); return; }
-    onSave(d); setD({ date: today(), shift: SHIFTS[0], report: "", nurseOnDuty: nurse || "" }); onClose();
+    onSave(d); setD(blank); onClose();
   };
   return (
     <Modal open={open} onClose={onClose} title="📝 Nursing Report">
       <div className="modal-body">
+        <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8, fontSize: 11 }}>
+          <span style={{ color: "var(--t3)" }}>Auto-saves as you type</span>
+          {saving && <span style={{ color: "var(--accent)" }}>💾 Saving…</span>}
+          {saved && !saving && <span style={{ color: "var(--success)" }}>✅ Saved</span>}
+        </div>
         <div className="form-row">
           <div className="form-group"><label className="form-label">Date</label><input className="form-input" type="date" value={d.date} onChange={e => set("date", e.target.value)} /></div>
           <div className="form-group"><label className="form-label">Shift</label><select className="form-select" value={d.shift} onChange={e => set("shift", e.target.value)}>{SHIFTS.map(s => <option key={s}>{s}</option>)}</select></div>
         </div>
         <div className="form-group"><label className="form-label">Nurse on Duty</label><input className="form-input" value={d.nurseOnDuty} onChange={e => set("nurseOnDuty", e.target.value)} /></div>
-        <div className="form-group"><label className="form-label">Report *</label><textarea className="form-textarea" style={{ minHeight: 120 }} value={d.report} onChange={e => set("report", e.target.value)} placeholder="Enter nursing report for this shift…" /></div>
+        <div className="form-group"><label className="form-label">Report *</label><textarea className="form-textarea" style={{ minHeight: 120 }} value={d.report} onChange={e => set("report", e.target.value)} placeholder="Enter nursing report for this shift — auto-saves as you type…" /></div>
       </div>
       <div className="modal-footer"><button className="btn btn-ghost" onClick={onClose}>Cancel</button><button className="btn btn-primary" onClick={save}>💾 Save Report</button></div>
     </Modal>
@@ -872,6 +965,243 @@ function AIResultModal({ open, onClose, title, content, loading }) {
   );
 }
 
+// ─── INCIDENT REPORT MODAL ────────────────────────────────────────────────────
+function IncidentModal({ open, onClose, nurse, patient, onSave }) {
+  const empty = { date: today(), time: nowTime(), type: "", severity: "medium", location: "", description: "", immediateAction: "", reportedTo: "", witness: "", patientHarmed: "no" };
+  const [d, setD] = useState(empty);
+  const set = (k,v) => setD(x=>({...x,[k]:v}));
+  useEffect(() => { if (open) setD({...empty, patientName: patient?.name||""}); }, [open]);
+  const TYPES = ["Patient Fall","Medication Error","Near Miss","Equipment Failure","Needle Stick Injury","Patient Aggression","Wrong Patient/Procedure","Pressure Injury","Adverse Drug Reaction","Visitor Incident","Other"];
+  const save = () => {
+    if (!d.type || !d.description.trim()) { alert("Incident type and description are required."); return; }
+    onSave({...d, id:"IR-"+uid(), nurse, createdAt:new Date().toISOString()});
+    onClose();
+  };
+  return (
+    <Modal open={open} onClose={onClose} title="⚠️ Incident Report" size="modal-lg">
+      <div className="modal-body">
+        <div className="form-row">
+          <div className="form-group"><label className="form-label">Date</label><input className="form-input" type="date" value={d.date} onChange={e=>set("date",e.target.value)} /></div>
+          <div className="form-group"><label className="form-label">Time</label><input className="form-input" type="time" value={d.time} onChange={e=>set("time",e.target.value)} /></div>
+        </div>
+        <div className="form-row">
+          <div className="form-group"><label className="form-label">Incident Type *</label>
+            <select className="form-select" value={d.type} onChange={e=>set("type",e.target.value)}>
+              <option value="">— Select type —</option>
+              {TYPES.map(t=><option key={t}>{t}</option>)}
+            </select>
+          </div>
+          <div className="form-group"><label className="form-label">Severity</label>
+            <select className="form-select" value={d.severity} onChange={e=>set("severity",e.target.value)}>
+              {["low","medium","high","critical"].map(s=><option key={s} value={s}>{s.charAt(0).toUpperCase()+s.slice(1)}</option>)}
+            </select>
+          </div>
+        </div>
+        <div className="form-row">
+          <div className="form-group"><label className="form-label">Location</label><input className="form-input" value={d.location} onChange={e=>set("location",e.target.value)} placeholder="e.g. Ward A, Bed 3" /></div>
+          <div className="form-group"><label className="form-label">Patient Harmed?</label>
+            <select className="form-select" value={d.patientHarmed} onChange={e=>set("patientHarmed",e.target.value)}>
+              <option value="no">No</option><option value="minor">Minor</option><option value="moderate">Moderate</option><option value="severe">Severe</option>
+            </select>
+          </div>
+        </div>
+        <div className="form-group"><label className="form-label">Description of Incident *</label><textarea className="form-textarea" style={{minHeight:90}} value={d.description} onChange={e=>set("description",e.target.value)} placeholder="Describe exactly what happened, in sequence…" /></div>
+        <div className="form-group"><label className="form-label">Immediate Action Taken</label><textarea className="form-textarea" style={{minHeight:60}} value={d.immediateAction} onChange={e=>set("immediateAction",e.target.value)} placeholder="What was done immediately after the incident…" /></div>
+        <div className="form-row">
+          <div className="form-group"><label className="form-label">Reported To</label><input className="form-input" value={d.reportedTo} onChange={e=>set("reportedTo",e.target.value)} placeholder="Name / role" /></div>
+          <div className="form-group"><label className="form-label">Witness (if any)</label><input className="form-input" value={d.witness} onChange={e=>set("witness",e.target.value)} placeholder="Witness name" /></div>
+        </div>
+      </div>
+      <div className="modal-footer"><button className="btn btn-ghost" onClick={onClose}>Cancel</button><button className="btn btn-primary" onClick={save}>📋 Submit Report</button></div>
+    </Modal>
+  );
+}
+
+// ─── ADMISSION CHECKLIST MODAL ────────────────────────────────────────────────
+function AdmissionChecklistModal({ open, onClose, nurse, onSave }) {
+  const [d, setD] = useState({ date: today(), time: nowTime(), admissionMode: "", consciousLevel: "Alert", painScore: 0, fallRisk: "", skinIntegrity: "", nutritionRisk: "", mobility: "", mentalStatus: "", orientation: { person: false, place: false, time: false }, allergiesVerified: false, idBandFitted: false, nextOfKinNotified: false, valuablesRecorded: false, medicationsReconciled: false, notes: "" });
+  const set = (k,v) => setD(x=>({...x,[k]:v}));
+  const FALL_RISKS = ["Low (0–2)","Moderate (3–4)","High (5+)"];
+  const SKIN_OPTIONS = ["Intact","Bruising","Pressure ulcer","Wound","Rash","Other"];
+  const MOBILITY = ["Independent","Requires assistance","Bed-bound","Wheelchair"];
+
+  // Morse Fall Scale simplified score
+  const fallScore = [
+    d.fallHistory?25:0, d.secondaryDiagnosis?15:0,
+    d.walkingAid==="furniture"?30:d.walkingAid==="crutches"?15:0,
+    d.ivAccess?20:0, d.gait==="impaired"?10:d.gait==="disabled"?20:0,
+    d.mentalStatus==="forgets"?15:0
+  ].reduce((a,b)=>a+b,0);
+  const fallRiskLevel = fallScore<25?"Low":fallScore<45?"Moderate":"High";
+
+  const save = () => {
+    onSave({...d, fallScore, fallRiskLevel, id:"AC-"+uid(), nurse, createdAt:new Date().toISOString()});
+    onClose();
+  };
+  return (
+    <Modal open={open} onClose={onClose} title="📋 Admission Checklist" size="modal-lg">
+      <div className="modal-body">
+        <div className="form-row">
+          <div className="form-group"><label className="form-label">Date</label><input className="form-input" type="date" value={d.date} onChange={e=>set("date",e.target.value)} /></div>
+          <div className="form-group"><label className="form-label">Time</label><input className="form-input" type="time" value={d.time} onChange={e=>set("time",e.target.value)} /></div>
+        </div>
+        <div className="form-row">
+          <div className="form-group"><label className="form-label">Admission Mode</label>
+            <select className="form-select" value={d.admissionMode} onChange={e=>set("admissionMode",e.target.value)}>
+              <option value="">—</option>{["Emergency","Elective","Transfer","Referral"].map(o=><option key={o}>{o}</option>)}
+            </select>
+          </div>
+          <div className="form-group"><label className="form-label">Conscious Level</label>
+            <select className="form-select" value={d.consciousLevel} onChange={e=>set("consciousLevel",e.target.value)}>
+              {["Alert","Voice response","Pain response","Unresponsive"].map(o=><option key={o}>{o}</option>)}
+            </select>
+          </div>
+        </div>
+
+        <div className="clinical-section">
+          <div className="clinical-section-title">🦺 Fall Risk Assessment (Morse Scale)
+            <span className={`risk-badge ${fallRiskLevel==="Low"?"risk-low":fallRiskLevel==="Moderate"?"risk-med":"risk-high"}`}>Score: {fallScore} — {fallRiskLevel}</span>
+          </div>
+          <div className="checklist-grid">
+            {[["fallHistory","History of falls in last 3 months"],["secondaryDiagnosis","Secondary diagnosis present"],["ivAccess","IV line / heparin lock"]].map(([k,l])=>(
+              <label key={k} className={`checklist-item ${d[k]?"checked":""}`}><input type="checkbox" checked={!!d[k]} onChange={e=>set(k,e.target.checked)} /><div><div className="checklist-label">{l}</div></div></label>
+            ))}
+            <div className="form-group" style={{marginBottom:0}}><label className="form-label">Walking Aid</label>
+              <select className="form-select" value={d.walkingAid||""} onChange={e=>set("walkingAid",e.target.value)}>
+                <option value="">None/bedrest/wheelchair</option><option value="crutches">Crutches/cane/walker</option><option value="furniture">Holds onto furniture</option>
+              </select>
+            </div>
+            <div className="form-group" style={{marginBottom:0}}><label className="form-label">Gait</label>
+              <select className="form-select" value={d.gait||""} onChange={e=>set("gait",e.target.value)}>
+                <option value="">Normal/bedrest</option><option value="impaired">Weak/impaired</option><option value="disabled">Impaired/disabled</option>
+              </select>
+            </div>
+            <div className="form-group" style={{marginBottom:0}}><label className="form-label">Mental Status</label>
+              <select className="form-select" value={d.mentalStatus||""} onChange={e=>set("mentalStatus",e.target.value)}>
+                <option value="">Oriented to own ability</option><option value="forgets">Forgets limitations</option>
+              </select>
+            </div>
+          </div>
+        </div>
+
+        <div className="clinical-section">
+          <div className="clinical-section-title">🩺 Clinical Assessment</div>
+          <div className="form-row">
+            <div className="form-group"><label className="form-label">Pain Score (0–10)</label>
+              <select className="form-select" value={d.painScore} onChange={e=>set("painScore",+e.target.value)}>
+                {PAIN_SCALE.map(n=><option key={n} value={n}>{n} {n===0?"(None)":n<=3?"(Mild)":n<=6?"(Moderate)":"(Severe)"}</option>)}
+              </select>
+            </div>
+            <div className="form-group"><label className="form-label">Skin Integrity</label>
+              <select className="form-select" value={d.skinIntegrity} onChange={e=>set("skinIntegrity",e.target.value)}>
+                <option value="">—</option>{SKIN_OPTIONS.map(o=><option key={o}>{o}</option>)}
+              </select>
+            </div>
+            <div className="form-group"><label className="form-label">Mobility</label>
+              <select className="form-select" value={d.mobility} onChange={e=>set("mobility",e.target.value)}>
+                <option value="">—</option>{MOBILITY.map(o=><option key={o}>{o}</option>)}
+              </select>
+            </div>
+          </div>
+          <div className="form-group"><label className="form-label">Orientation</label>
+            <div style={{display:"flex",gap:12,flexWrap:"wrap"}}>
+              {["person","place","time"].map(k=>(
+                <label key={k} style={{display:"flex",alignItems:"center",gap:6,fontSize:12,cursor:"pointer"}}>
+                  <input type="checkbox" checked={!!d.orientation?.[k]} onChange={e=>setD(x=>({...x,orientation:{...x.orientation,[k]:e.target.checked}}))} style={{accentColor:"var(--accent)"}} />
+                  Oriented to {k}
+                </label>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        <div className="clinical-section">
+          <div className="clinical-section-title">✅ Admission Checklist</div>
+          <div className="checklist-grid">
+            {[["allergiesVerified","Allergies verified & documented"],["idBandFitted","ID band fitted & verified"],["nextOfKinNotified","Next of kin notified"],["valuablesRecorded","Valuables inventoried & stored"],["medicationsReconciled","Medications reconciled"]].map(([k,l])=>(
+              <label key={k} className={`checklist-item ${d[k]?"checked":""}`}><input type="checkbox" checked={!!d[k]} onChange={e=>set(k,e.target.checked)} /><div><div className="checklist-label">{l}</div></div></label>
+            ))}
+          </div>
+        </div>
+        <div className="form-group"><label className="form-label">Additional Notes</label><textarea className="form-textarea" value={d.notes} onChange={e=>set("notes",e.target.value)} placeholder="Any other observations on admission…" /></div>
+      </div>
+      <div className="modal-footer"><button className="btn btn-ghost" onClick={onClose}>Cancel</button><button className="btn btn-primary" onClick={save}>💾 Save Checklist</button></div>
+    </Modal>
+  );
+}
+
+// ─── DISCHARGE SUMMARY MODAL ──────────────────────────────────────────────────
+function DischargeSummaryModal({ open, onClose, nurse, patient, onSave }) {
+  const [d, setD] = useState({ date: today(), time: nowTime(), dischargeType: "Home", conditionAtDischarge: "", functionalStatus: "", painAtDischarge: 0, woundCondition: "", medicationsToTakeHome: "", medicationsCeased: "", followUpDate: "", followUpWith: "", followUpLocation: "", dietAdvice: "", activityAdvice: "", woundCareAdvice: "", returnToEDAdvice: "", patientEducationGiven: [], patientUnderstands: false, caregiverEducation: false, dischargeLetterGiven: false, scriptGiven: false, referralsMade: "", notes: "" });
+  const set = (k,v) => setD(x=>({...x,[k]:v}));
+  const EDU_ITEMS = ["Medication instructions","Activity restrictions","Diet advice","Wound care","Warning signs to watch for","Follow-up appointment","When to return to ED"];
+  const toggleEdu = (item) => setD(x=>({ ...x, patientEducationGiven: x.patientEducationGiven.includes(item) ? x.patientEducationGiven.filter(i=>i!==item) : [...x.patientEducationGiven, item] }));
+  const save = () => {
+    onSave({...d, id:"DS-"+uid(), nurse, patientId:patient?.id, patientName:patient?.name, diagnosis:patient?.diagnosis, createdAt:new Date().toISOString()});
+    onClose();
+  };
+  return (
+    <Modal open={open} onClose={onClose} title="🚪 Discharge Summary" size="modal-lg">
+      <div className="modal-body">
+        <div className="form-row">
+          <div className="form-group"><label className="form-label">Discharge Date</label><input className="form-input" type="date" value={d.date} onChange={e=>set("date",e.target.value)} /></div>
+          <div className="form-group"><label className="form-label">Time</label><input className="form-input" type="time" value={d.time} onChange={e=>set("time",e.target.value)} /></div>
+        </div>
+        <div className="form-row">
+          <div className="form-group"><label className="form-label">Discharged To</label>
+            <select className="form-select" value={d.dischargeType} onChange={e=>set("dischargeType",e.target.value)}>
+              {["Home","Home with support","Nursing home","Rehabilitation facility","Another hospital","Against medical advice"].map(o=><option key={o}>{o}</option>)}
+            </select>
+          </div>
+          <div className="form-group"><label className="form-label">Pain at Discharge (0–10)</label>
+            <select className="form-select" value={d.painAtDischarge} onChange={e=>set("painAtDischarge",+e.target.value)}>
+              {PAIN_SCALE.map(n=><option key={n} value={n}>{n}</option>)}
+            </select>
+          </div>
+        </div>
+        <div className="form-group"><label className="form-label">Condition at Discharge</label><textarea className="form-textarea" style={{minHeight:70}} value={d.conditionAtDischarge} onChange={e=>set("conditionAtDischarge",e.target.value)} placeholder="Describe patient's overall clinical condition on discharge…" /></div>
+
+        <div className="clinical-section">
+          <div className="clinical-section-title">💊 Medications</div>
+          <div className="form-group"><label className="form-label">Medications to Take Home</label><textarea className="form-textarea" style={{minHeight:60}} value={d.medicationsToTakeHome} onChange={e=>set("medicationsToTakeHome",e.target.value)} placeholder="List all discharge medications…" /></div>
+          <div className="form-group"><label className="form-label">Medications Ceased/Changed</label><textarea className="form-textarea" style={{minHeight:50}} value={d.medicationsCeased} onChange={e=>set("medicationsCeased",e.target.value)} placeholder="List any meds stopped or changed and reason…" /></div>
+        </div>
+
+        <div className="clinical-section">
+          <div className="clinical-section-title">📅 Follow-Up</div>
+          <div className="form-row">
+            <div className="form-group"><label className="form-label">Follow-Up Date</label><input className="form-input" type="date" value={d.followUpDate} onChange={e=>set("followUpDate",e.target.value)} /></div>
+            <div className="form-group"><label className="form-label">Follow-Up With</label><input className="form-input" value={d.followUpWith} onChange={e=>set("followUpWith",e.target.value)} placeholder="Dr / Clinic name" /></div>
+          </div>
+          <div className="form-group"><label className="form-label">Follow-Up Location</label><input className="form-input" value={d.followUpLocation} onChange={e=>set("followUpLocation",e.target.value)} placeholder="Hospital / clinic address" /></div>
+          <div className="form-group"><label className="form-label">Return to ED if…</label><textarea className="form-textarea" style={{minHeight:50}} value={d.returnToEDAdvice} onChange={e=>set("returnToEDAdvice",e.target.value)} placeholder="e.g. Fever >38.5, increased pain, shortness of breath…" /></div>
+        </div>
+
+        <div className="clinical-section">
+          <div className="clinical-section-title">📚 Patient Education Given</div>
+          <div className="checklist-grid">
+            {EDU_ITEMS.map(item=>(
+              <label key={item} className={`checklist-item ${d.patientEducationGiven.includes(item)?"checked":""}`}>
+                <input type="checkbox" checked={d.patientEducationGiven.includes(item)} onChange={()=>toggleEdu(item)} />
+                <div className="checklist-label">{item}</div>
+              </label>
+            ))}
+          </div>
+          <div style={{display:"flex",gap:14,flexWrap:"wrap",marginTop:10}}>
+            {[["patientUnderstands","Patient verbally confirms understanding"],["caregiverEducation","Caregiver/family also educated"],["dischargeLetterGiven","Discharge letter given"],["scriptGiven","Prescription given"]].map(([k,l])=>(
+              <label key={k} style={{display:"flex",alignItems:"center",gap:6,fontSize:12,cursor:"pointer"}}>
+                <input type="checkbox" checked={!!d[k]} onChange={e=>set(k,e.target.checked)} style={{accentColor:"var(--accent)"}} />{l}
+              </label>
+            ))}
+          </div>
+        </div>
+        <div className="form-group"><label className="form-label">Additional Notes</label><textarea className="form-textarea" value={d.notes} onChange={e=>set("notes",e.target.value)} placeholder="Any other relevant discharge information…" /></div>
+      </div>
+      <div className="modal-footer"><button className="btn btn-ghost" onClick={onClose}>Cancel</button><button className="btn btn-primary" onClick={save}>💾 Save Discharge Summary</button></div>
+    </Modal>
+  );
+}
+
 // ─── LOGIN PAGE ───────────────────────────────────────────────────────────────
 function LoginPage({ onLogin }) {
   const [tab, setTab] = useState("login");
@@ -887,13 +1217,11 @@ function LoginPage({ onLogin }) {
     if (!loginData.email || !loginData.password) { showMsg("Enter your email and password."); return; }
     setBusy(true);
     try {
-      const [cred] = await Promise.all([
-        FB.login(loginData.email, loginData.password),
-        new Promise(r => setTimeout(r, 500)),
-      ]);
-      onLogin({ uid: cred.user.uid, email: cred.user.email });
-      FB.getProfile(cred.user.uid).then(profile => { if (profile) onLogin(prev => ({ ...prev, ...profile })); }).catch(() => {});
-    } catch (e) { showMsg(e.code === "auth/invalid-credential" ? "Incorrect email or password." : e.message); setBusy(false); }
+      const cred = await FB.login(loginData.email, loginData.password);
+      const profile = await FB.getProfile(cred.user.uid);
+      onLogin({ uid: cred.user.uid, email: cred.user.email, ...profile });
+    } catch (e) { showMsg(e.code === "auth/invalid-credential" ? "Incorrect email or password." : e.message); }
+    setBusy(false);
   };
 
   const doRegister = async () => {
@@ -1149,30 +1477,39 @@ function LabTab({ patient }) {
 }
 
 function OrdersTab({ patient, nurse, onUpdate }) {
-  const rows = patient.doctorOrders || [];
+  // Show all orders newest-first, continuous scroll — all entries always visible
+  const rows = [...(patient.doctorOrders || [])].sort((a,b) => {
+    const da = new Date((a.date||"")+"T"+(a.time||"00:00")), db2 = new Date((b.date||"")+"T"+(b.time||"00:00"));
+    return db2 - da;
+  });
   const toggleAck = async (orderId) => {
-    const updated = { ...patient, doctorOrders: rows.map(o => o.id === orderId ? { ...o, acknowledged: true, acknowledgedBy: nurse, acknowledgedAt: new Date().toISOString() } : o) };
+    const updated = { ...patient, doctorOrders: (patient.doctorOrders||[]).map(o => o.id === orderId ? { ...o, acknowledged: true, acknowledgedBy: nurse, acknowledgedAt: new Date().toISOString() } : o) };
     await FB.savePatient(updated); onUpdate(updated);
   };
   return (
-    <div className="info-card"><h4>Doctor's Orders ({rows.length})</h4>
-      {rows.length === 0 ? <div className="empty-state" style={{ padding: 20 }}><div className="empty-icon">📋</div><div className="empty-text">No orders</div></div> : (
-        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          {rows.map(r => (
-            <div key={r.id} style={{ background: "var(--bg3)", border: `1px solid ${r.priority === "STAT" ? "var(--danger)" : r.priority === "Urgent" ? "var(--warning)" : "var(--border2)"}`, borderRadius: "var(--r-sm)", padding: 11 }}>
+    <div className="info-card">
+      <h4>Doctor's Orders — Full History ({rows.length})</h4>
+      <div style={{ fontSize: 11, color: "var(--t3)", marginBottom: 10 }}>All orders saved continuously. Scroll down to see older entries.</div>
+      {rows.length === 0 ? <div className="empty-state" style={{ padding: 20 }}><div className="empty-icon">📋</div><div className="empty-text">No orders yet</div></div> : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {rows.map((r, idx) => (
+            <div key={r.id || idx} style={{ background: "var(--bg3)", border: `1px solid ${r.priority === "STAT" ? "var(--danger)" : r.priority === "Urgent" ? "var(--warning)" : "var(--border2)"}`, borderRadius: "var(--r-sm)", padding: 12, position: "relative" }}>
+              {idx === 0 && <span style={{ position:"absolute", top:8, right:10, fontSize:9, fontWeight:700, background:"var(--accent)", color:"#000", borderRadius:10, padding:"1px 6px" }}>LATEST</span>}
               <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6, flexWrap: "wrap", gap: 5 }}>
                 <div style={{ display: "flex", gap: 7, alignItems: "center" }}>
                   <span style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--accent)" }}>{r.date} {r.time}</span>
                   <span className={`badge ${r.priority === "STAT" ? "badge-critical" : r.priority === "Urgent" ? "badge-warning" : "badge-active"}`}>{r.priority}</span>
                 </div>
-                <span style={{ fontSize: 11, color: "var(--t2)" }}>Dr. {r.doctor || "—"}</span>
+                <span style={{ fontSize: 11, color: "var(--t2)" }}>Dr. {r.doctor || "—"} {r.nurse ? `· Rec: ${r.nurse}` : ""}</span>
               </div>
-              <p style={{ fontSize: 13, lineHeight: 1.6, marginBottom: 7 }}>{r.order}</p>
+              <p style={{ fontSize: 13, lineHeight: 1.65, marginBottom: 7, whiteSpace:"pre-wrap" }}>{r.order}</p>
+              {r.notes && <div style={{ fontSize:11, color:"var(--t3)", marginBottom:7, fontStyle:"italic" }}>{r.notes}</div>}
               {r.acknowledged
-                ? <div style={{ fontSize: 11, color: "var(--success)" }}>✅ Acknowledged by {r.acknowledgedBy} at {r.acknowledgedAt ? new Date(r.acknowledgedAt).toLocaleTimeString() : "—"}</div>
+                ? <div style={{ fontSize: 11, color: "var(--success)" }}>✅ Acknowledged by {r.acknowledgedBy} · {r.acknowledgedAt ? new Date(r.acknowledgedAt).toLocaleString() : "—"}</div>
                 : <button className="btn btn-secondary btn-sm" onClick={() => toggleAck(r.id)}>✋ Acknowledge Order</button>}
             </div>
           ))}
+          <div style={{ textAlign:"center", padding:"8px 0", fontSize:11, color:"var(--t3)" }}>— End of orders history —</div>
         </div>
       )}
     </div>
@@ -1188,6 +1525,127 @@ function TransfusionTab({ patient }) {
           <tbody>{rows.map(r => <tr key={r.id}><td>{r.date}</td><td style={{ fontFamily: "var(--mono)", fontWeight: 600 }}>{r.bloodType}</td><td>{r.units}</td><td>{r.nurse}</td><td>{r.notes || "—"}</td></tr>)}</tbody>
         </table></div>
       )}
+    </div>
+  );
+}
+
+function NEWS2Tab({ patient }) {
+  const vitals = patient.vitals || [];
+  if (!vitals.length) return <div className="empty-state"><div className="empty-icon">💓</div><div className="empty-text">No Vitals Recorded</div><div className="empty-sub">Record vitals to see NEWS2 score.</div></div>;
+  return (
+    <div style={{padding:"12px 0"}}>
+      <div style={{fontWeight:700,fontSize:13,marginBottom:10,color:"var(--t2)"}}>📈 NEWS2 Early Warning Score History</div>
+      {vitals.slice(0,10).map((v,i) => {
+        const n = calcNEWS2(v);
+        if (!n) return null;
+        const cls = n.risk==="low"?"news2-low":n.risk==="medium"?"news2-med":"news2-high";
+        return (
+          <div key={i} className={`news2-bar ${cls}`} style={{flexDirection:"column",alignItems:"flex-start"}}>
+            <div style={{display:"flex",alignItems:"center",gap:12,width:"100%"}}>
+              <div className="news2-score">{n.score}</div>
+              <div style={{flex:1}}>
+                <div style={{fontWeight:700,fontSize:13}}>{n.label}</div>
+                <div style={{fontSize:11,opacity:.8,marginTop:1}}>{n.action}</div>
+                <div style={{fontSize:10,opacity:.7,marginTop:2}}>{v.recordedAt ? new Date(v.recordedAt).toLocaleString() : "—"}{v.nurse ? ` · ${v.nurse}` : ""}</div>
+              </div>
+            </div>
+            <div className="news2-grid" style={{width:"100%"}}>
+              {n.breakdown.map(b=>(
+                <div key={b.label} className="news2-item">
+                  <div className="news2-item-label">{b.label}</div>
+                  <div className="news2-item-val">{b.val}</div>
+                  <div className="news2-item-pts">{b.pts} pt{b.pts!==1?"s":""}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function AdmissionTab({ patient }) {
+  const records = patient.admissionChecklists || [];
+  if (!records.length) return <div className="empty-state"><div className="empty-icon">📋</div><div className="empty-text">No Admission Checklist</div><div className="empty-sub">Complete on patient admission.</div></div>;
+  return (
+    <div style={{padding:"12px 0"}}>
+      {records.map(r => (
+        <div key={r.id} className="clinical-section">
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+            <div style={{fontWeight:700,fontSize:13}}>{r.date} {r.time}</div>
+            <div style={{display:"flex",gap:8}}>
+              <span className={`risk-badge ${r.fallRiskLevel==="Low"?"risk-low":r.fallRiskLevel==="Moderate"?"risk-med":"risk-high"}`}>Fall: {r.fallRiskLevel} ({r.fallScore})</span>
+              <span style={{fontSize:11,color:"var(--t2)"}}>By {r.nurse}</span>
+            </div>
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(160px,1fr))",gap:7,fontSize:12}}>
+            {[["Admission Mode",r.admissionMode],["Conscious Level",r.consciousLevel],["Pain Score",r.painScore+"/10"],["Skin",r.skinIntegrity],["Mobility",r.mobility]].map(([l,v])=>v?<div key={l} style={{background:"var(--bg3)",borderRadius:"var(--r-sm)",padding:"5px 8px"}}><div style={{fontSize:9,color:"var(--t3)",fontWeight:700,textTransform:"uppercase"}}>{l}</div><div style={{fontWeight:600}}>{v}</div></div>:null)}
+          </div>
+          {r.orientation && <div style={{marginTop:8,fontSize:12}}>Orientation: {["person","place","time"].filter(k=>r.orientation[k]).map(k=>`✅ ${k}`).join("  ") || "Not documented"}</div>}
+          <div style={{display:"flex",gap:10,flexWrap:"wrap",marginTop:8,fontSize:11}}>
+            {[["allergiesVerified","Allergies verified"],["idBandFitted","ID band fitted"],["nextOfKinNotified","NOK notified"],["valuablesRecorded","Valuables recorded"],["medicationsReconciled","Meds reconciled"]].map(([k,l])=><span key={k} style={{color:r[k]?"var(--success)":"var(--t3)"}}>{r[k]?"✅":"❌"} {l}</span>)}
+          </div>
+          {r.notes && <div style={{marginTop:8,fontSize:12,color:"var(--t2)"}}>{r.notes}</div>}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function DischargeSummaryTab({ patient }) {
+  const records = patient.dischargeSummaries || [];
+  if (!records.length) return <div className="empty-state"><div className="empty-icon">🚪</div><div className="empty-text">No Discharge Summary</div><div className="empty-sub">Complete when discharging the patient.</div></div>;
+  return (
+    <div style={{padding:"12px 0"}}>
+      {records.map(r => (
+        <div key={r.id} className="clinical-section">
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+            <div style={{fontWeight:700,fontSize:13}}>Discharge: {r.date} {r.time}</div>
+            <span style={{fontSize:11,color:"var(--t2)"}}>By {r.nurse}</span>
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(160px,1fr))",gap:7,fontSize:12,marginBottom:10}}>
+            {[["Discharged To",r.dischargeType],["Pain at D/C",r.painAtDischarge+"/10"],["Follow-Up",r.followUpDate],["Follow-Up With",r.followUpWith]].map(([l,v])=>v!=null&&v!==""?<div key={l} style={{background:"var(--bg3)",borderRadius:"var(--r-sm)",padding:"5px 8px"}}><div style={{fontSize:9,color:"var(--t3)",fontWeight:700,textTransform:"uppercase"}}>{l}</div><div style={{fontWeight:600}}>{v}</div></div>:null)}
+          </div>
+          {r.conditionAtDischarge && <div style={{marginBottom:8,fontSize:12}}><strong>Condition:</strong> {r.conditionAtDischarge}</div>}
+          {r.medicationsToTakeHome && <div style={{marginBottom:8,fontSize:12}}><strong>Take-home meds:</strong> {r.medicationsToTakeHome}</div>}
+          {r.returnToEDAdvice && <div style={{marginBottom:8,fontSize:12,color:"var(--danger)"}}><strong>⚠️ Return to ED if:</strong> {r.returnToEDAdvice}</div>}
+          {r.patientEducationGiven?.length > 0 && <div style={{marginBottom:8,fontSize:12}}><strong>Education given:</strong> {r.patientEducationGiven.join(", ")}</div>}
+          <div style={{display:"flex",gap:10,flexWrap:"wrap",fontSize:11}}>
+            {[["patientUnderstands","Patient understands"],["caregiverEducation","Caregiver educated"],["dischargeLetterGiven","Letter given"],["scriptGiven","Script given"]].map(([k,l])=><span key={k} style={{color:r[k]?"var(--success)":"var(--t3)"}}>{r[k]?"✅":"❌"} {l}</span>)}
+          </div>
+          {r.notes && <div style={{marginTop:8,fontSize:12,color:"var(--t2)"}}>{r.notes}</div>}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function IncidentsTab({ patient }) {
+  const records = patient.incidents || [];
+  if (!records.length) return <div className="empty-state"><div className="empty-icon">⚠️</div><div className="empty-text">No Incidents Reported</div><div className="empty-sub">Incidents related to this patient will appear here.</div></div>;
+  const sevColor = s => s==="critical"?"var(--danger)":s==="high"?"var(--warning)":s==="medium"?"#fb923c":"var(--success)";
+  return (
+    <div style={{padding:"12px 0"}}>
+      {records.map(r => (
+        <div key={r.id} className={`incident-card ${r.severity}`}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:6}}>
+            <div>
+              <div className="incident-type">{r.type}</div>
+              <div style={{fontWeight:700,fontSize:13,marginTop:2}}>{r.date} {r.time} · {r.location||"—"}</div>
+            </div>
+            <span style={{background:sevColor(r.severity)+"22",color:sevColor(r.severity),padding:"2px 9px",borderRadius:20,fontSize:11,fontWeight:700}}>{r.severity?.toUpperCase()}</span>
+          </div>
+          <div style={{fontSize:12,marginBottom:6,lineHeight:1.5}}>{r.description}</div>
+          {r.immediateAction && <div style={{fontSize:11,color:"var(--t2)",marginBottom:4}}><strong>Action taken:</strong> {r.immediateAction}</div>}
+          {r.reportedTo && <div style={{fontSize:11,color:"var(--t2)",marginBottom:4}}><strong>Reported to:</strong> {r.reportedTo}</div>}
+          <div style={{fontSize:10,color:"var(--t3)",display:"flex",gap:10,flexWrap:"wrap",marginTop:4}}>
+            <span>Patient harmed: {r.patientHarmed||"No"}</span>
+            {r.witness && <span>Witness: {r.witness}</span>}
+            <span>By: {r.nurse}</span>
+          </div>
+        </div>
+      ))}
     </div>
   );
 }
@@ -1208,8 +1666,10 @@ function PatientDetail({ patient, user, onUpdate, toast }) {
   };
 
   const save = async (field, entry) => {
+    // Append entry to Firestore array instantly (backend writes every time)
+    await FB.appendToPatient(patient.id, field, entry);
     const updated = { ...patient, [field]: [entry, ...(patient[field] || [])] };
-    await FB.savePatient(updated); refresh(updated);
+    refresh(updated);
   };
   const saveArr = async (field, arr) => {
     const updated = { ...patient, [field]: arr };
@@ -1218,10 +1678,11 @@ function PatientDetail({ patient, user, onUpdate, toast }) {
 
   const latestV = patient.vitals?.[0] || {};
   const tabs = [
-    ["visit", "📋 Visit"], ["vitals", "💓 Vitals"], ["prescription", "📝 Prescription"],
-    ["medadmin", "💊 Med Admin"], ["orders", "📋 Orders"], ["glycemic", "🩸 Glycemic"],
-    ["fluid", "💧 Fluid"], ["nursing", "📝 Nursing"], ["wound", "🩹 Wounds"],
-    ["lab", "🧪 Labs"], ["transfusion", "🩸 Transfusion"],
+    ["visit", "📋 Visit"], ["vitals", "💓 Vitals"], ["news2", "📈 NEWS2"],
+    ["prescription", "📝 Rx"], ["medadmin", "💊 Med Admin"], ["orders", "📋 Orders"],
+    ["glycemic", "🩸 Glycemic"], ["fluid", "💧 Fluid"], ["nursing", "📝 Nursing"],
+    ["wound", "🩹 Wounds"], ["lab", "🧪 Labs"], ["transfusion", "🩸 Transfusion"],
+    ["admission", "📋 Admission"], ["discharge", "🚪 Discharge"], ["incidents", "⚠️ Incidents"],
   ];
 
   const exportRecord = () => {
@@ -1281,6 +1742,13 @@ function PatientDetail({ patient, user, onUpdate, toast }) {
           <div className="stat-card" key={label}><div className="stat-icon">{icon}</div><div className="stat-label">{label}</div><div className="stat-value">{val}</div><div className="stat-unit">{unit}</div></div>
         ))}
       </div>
+      {(() => { const n2=calcNEWS2(latestV); if(!n2) return null; const cls=n2.risk==="low"?"news2-low":n2.risk==="medium"?"news2-med":"news2-high"; return (
+        <div className={`news2-bar ${cls}`} onClick={()=>setActiveTab("news2")} style={{cursor:"pointer",marginBottom:12}}>
+          <div className="news2-score">{n2.score}</div>
+          <div style={{flex:1}}><div style={{fontWeight:700,fontSize:12}}>NEWS2: {n2.label}</div><div style={{fontSize:11,opacity:.85}}>{n2.action}</div></div>
+          <span style={{fontSize:11,opacity:.7}}>View history →</span>
+        </div>
+      ); })()}
 
       <div className="quick-actions">
         {[
@@ -1289,6 +1757,8 @@ function PatientDetail({ patient, user, onUpdate, toast }) {
           ["🩸", "Glucose", () => openM("glucose")], ["💧", "Fluid I/O", () => openM("fluid")],
           ["📝", "Nursing Report", () => openM("nursing")], ["🩹", "Wound Care", () => openM("wound")],
           ["🧪", "Lab Result", () => openM("lab")], ["🩸", "Transfusion", () => openM("transfusion")],
+          ["⚠️", "Incident", () => openM("incident")], ["📋", "Admission CL", () => openM("admissionCL")],
+          ["🚪", "Discharge", () => openM("dischargeSummary")],
         ].map(([icon, label, fn]) => (
           <button key={label} className="quick-btn" onClick={fn}><span>{icon}</span>{label}</button>
         ))}
@@ -1309,17 +1779,32 @@ function PatientDetail({ patient, user, onUpdate, toast }) {
       {activeTab === "wound" && <WoundTab patient={patient} />}
       {activeTab === "lab" && <LabTab patient={patient} />}
       {activeTab === "transfusion" && <TransfusionTab patient={patient} />}
+      {activeTab === "news2" && <NEWS2Tab patient={patient} />}
+      {activeTab === "admission" && <AdmissionTab patient={patient} />}
+      {activeTab === "discharge" && <DischargeSummaryTab patient={patient} />}
+      {activeTab === "incidents" && <IncidentsTab patient={patient} />}
 
       <VitalsModal open={!!modals.vitals} onClose={() => closeM("vitals")} nurse={user?.name} onSave={async v => { const entry = { ...v, id: uid(), recordedAt: new Date().toISOString() }; await save("vitals", entry); toast("Vital signs saved."); const a = checkVitalAlerts(v); if (a.some(x => x.level === "critical")) toast("⚠️ Critical vitals detected!", "warning"); }} />
       <GlucoseModal open={!!modals.glucose} onClose={() => closeM("glucose")} nurse={user?.name} onSave={async g => { await save("glucoseReadings", { ...g, id: uid() }); toast("Glucose saved."); }} />
       <FluidModal open={!!modals.fluid} onClose={() => closeM("fluid")} nurse={user?.name} onSave={async f => { await save("fluidEntries", { ...f, id: uid() }); toast("Fluid entry saved."); }} />
       <MedAdminModal open={!!modals.medAdmin} onClose={() => closeM("medAdmin")} nurse={user?.name} onSave={async e => { await save("medAdminLogs", { ...e, id: uid() }); toast("Administration recorded."); }} />
       <PrescriptionModal open={!!modals.prescription} onClose={() => closeM("prescription")} patient={patient} onSave={async list => { await saveArr("prescriptions", list); toast("Prescriptions saved."); }} />
-      <NursingReportModal open={!!modals.nursing} onClose={() => closeM("nursing")} nurse={user?.name} onSave={async rp => { await save("nursingReports", { ...rp, id: uid() }); toast("Nursing report saved."); }} />
+      <NursingReportModal open={!!modals.nursing} onClose={() => closeM("nursing")} nurse={user?.name} onSave={async rp => {
+        const entryId = rp.id || uid();
+        const existing = patient.nursingReports || [];
+        const alreadyExists = existing.some(e => e.id === entryId);
+        const entry = { ...rp, id: entryId };
+        const updated = { ...patient, nursingReports: alreadyExists ? existing.map(e => e.id === entryId ? entry : e) : [entry, ...existing] };
+        await FB.savePatient(updated); refresh(updated);
+        if (!rp._draft) toast("Nursing report saved.");
+      }} />
       <WoundCareModal open={!!modals.wound} onClose={() => closeM("wound")} nurse={user?.name} onSave={async w => { await save("woundRecords", { ...w, id: uid() }); toast("Wound record saved."); }} />
       <LabResultModal open={!!modals.lab} onClose={() => closeM("lab")} nurse={user?.name} onSave={async l => { await save("labResults", { ...l, id: uid() }); toast("Lab result saved."); }} />
       <DoctorOrderModal open={!!modals.doctorOrder} onClose={() => closeM("doctorOrder")} nurse={user?.name} onSave={async o => { await save("doctorOrders", { ...o, id: uid() }); toast("Order saved."); }} />
       <TransfusionModal open={!!modals.transfusion} onClose={() => closeM("transfusion")} nurse={user?.name} onSave={async t => { await save("transfusions", { ...t, id: uid() }); toast("Transfusion saved."); }} />
+      <IncidentModal open={!!modals.incident} onClose={() => closeM("incident")} nurse={user?.name} patient={patient} onSave={async inc => { await save("incidents", inc); toast("Incident report submitted."); }} />
+      <AdmissionChecklistModal open={!!modals.admissionCL} onClose={() => closeM("admissionCL")} nurse={user?.name} onSave={async ac => { await save("admissionChecklists", ac); toast("Admission checklist saved."); }} />
+      <DischargeSummaryModal open={!!modals.dischargeSummary} onClose={() => closeM("dischargeSummary")} nurse={user?.name} patient={patient} onSave={async ds => { await save("dischargeSummaries", ds); toast("Discharge summary saved."); }} />
       <StatusModal open={!!modals.status} onClose={() => closeM("status")} onSave={async (action, ward, notes, date) => {
         const entry = { action, date, notes, id: uid(), ...(action === "transfer" && ward ? { toWard: ward } : {}) };
         const newStatus = action === "discharge" ? "discharged" : action === "active" ? "active" : patient.status;
@@ -2061,14 +2546,14 @@ function MainApp({ user, onLogout }) {
   const [loading, setLoading] = useState(true);
   const [modals, setModals] = useState({});
   const [notifOpen, setNotifOpen] = useState(false);
-  const [sidebarOpen, setSidebarOpen] = useState(false);
   const [toastState, showToast] = useToast();
   const { notifs, unread, markRead } = useNotifications(patients);
   const openM = (m) => setModals(x => ({ ...x, [m]: true }));
   const closeM = (m) => setModals(x => ({ ...x, [m]: false }));
 
   useEffect(() => {
-    const unsubPt = FB.onPatients(pts => { setPatients(pts); setLoading(false); });
+    const loadTimer = setTimeout(() => setLoading(false), 3000);
+    const unsubPt = FB.onPatients(pts => { setPatients(pts); setLoading(false); clearTimeout(loadTimer); });
     const unsubNurse = FB.onSettings("overallNurse", d => setOverallNurse(d?.name ? { name: d.name, uid: d.uid || null } : null));
     const unsubWR = FB.onWardReports(setWardReports);
     const unsubAR = FB.on24hrArchives(setArchives);
@@ -2076,22 +2561,33 @@ function MainApp({ user, onLogout }) {
     return () => { unsubPt(); unsubNurse(); unsubWR(); unsubAR(); };
   }, []);
 
-  const filtered = patients.filter(p => {
+  // Role helpers — isOverallNurse must come first
+  const isOverallNurse = !!(overallNurse?.uid && overallNurse.uid === user.uid);
+  const isNurse = user.role === "nurse";
+  const canSeeAllWards = user.role === "supervisor" || user.role === "wardmaster" || isOverallNurse;
+  const roleLabel = user.role === "wardmaster" ? "Ward Master" : user.role === "supervisor" ? "Supervisor / CNS" : "Ward Nurse";
+
+  // Nurses see only their ward patients in the list; others see all
+  const wardPatients = isNurse && !canSeeAllWards
+    ? patients.filter(p => p.ward === user.ward)
+    : patients;
+
+  const filtered = wardPatients.filter(p => {
     if (filter === "active") return (p.status || "active") === "active";
     if (filter === "discharged") return p.status === "discharged";
     return true;
   });
+
+  // selected: always look in ALL patients (so EMR cross-ward search works for nurses)
   const selected = patients.find(p => p.id === selectedId) || null;
-  const roleLabel = user.role === "wardmaster" ? "Ward Master" : user.role === "supervisor" ? "Supervisor" : "Ward Nurse";
-  // true when the currently logged-in user is the assigned overall nurse of the day
-  const isOverallNurse = !!(overallNurse?.uid && overallNurse.uid === user.uid);
 
   const handleAddPatient = async (data) => {
     const patient = {
       id: "PT-" + uid(), status: "active", createdAt: new Date().toISOString(),
       vitals: [], medAdminLogs: [], glucoseReadings: [], fluidEntries: [],
       prescriptions: [], nursingReports: [], statusHistory: [], transfusions: [],
-      woundRecords: [], labResults: [], doctorOrders: [], ...data,
+      woundRecords: [], labResults: [], doctorOrders: [], incidents: [],
+      admissionChecklists: [], dischargeSummaries: [], ...data,
     };
     try { await FB.savePatient(patient); setSelectedId(patient.id); showToast("Patient added."); }
     catch (e) { showToast("Error: " + e.message, "error"); }
@@ -2101,7 +2597,10 @@ function MainApp({ user, onLogout }) {
     setPatients(ps => ps.map(p => p.id === updated.id ? updated : p));
   };
 
-  const handleSelectPatient = (id) => { setSelectedId(id); setSection("patients"); };
+  const handleSelectPatient = (id) => {
+    setSelectedId(id);
+    setSection("patients");
+  };
 
   return (
     <div className={`app ${darkMode ? "" : "theme-light"}`}>
@@ -2110,8 +2609,7 @@ function MainApp({ user, onLogout }) {
       <NotifPanel open={notifOpen} notifs={notifs} unread={unread} onMarkRead={markRead} onClose={() => setNotifOpen(false)} onSelectPatient={handleSelectPatient} />
 
       {/* Sidebar */}
-      <div className="sidebar-overlay" onClick={() => setSidebarOpen(false)} />
-      <nav className={`sidebar ${sidebarOpen ? "open" : ""}`}>
+      <nav className="sidebar">
         <div className="sb-logo">
           <div className="sb-logo-mark">
             <div className="sb-icon">⚕️</div>
@@ -2124,17 +2622,17 @@ function MainApp({ user, onLogout }) {
         </div>
         <div className="sb-nav">
           <div className="nav-section">Clinical</div>
-          <button className={`nav-btn ${section === "patients" ? "active" : ""}`} onClick={() => { setSection("patients"); setSidebarOpen(false); }}><span className="ni">🏥</span>Patients</button>
-          <button className={`nav-btn ${section === "overview" ? "active" : ""}`} onClick={() => { setSection("overview"); setSidebarOpen(false); }}><span className="ni">🗺️</span>Ward Overview</button>
-          <button className={`nav-btn ${section === "reports" ? "active" : ""}`} onClick={() => { setSection("reports"); setSidebarOpen(false); }}><span className="ni">📊</span>Reports</button>
-          {user.role === "nurse" && <button className={`nav-btn ${section === "wardreport" ? "active" : ""}`} onClick={() => { setSection("wardreport"); setSidebarOpen(false); }}><span className="ni">📝</span>Ward Report</button>}
+          <button className={`nav-btn ${section === "patients" ? "active" : ""}`} onClick={() => setSection("patients")}><span className="ni">🏥</span>Patients</button>
+          {(user.role === "supervisor" || user.role === "wardmaster" || isOverallNurse) && <button className={`nav-btn ${section === "overview" ? "active" : ""}`} onClick={() => setSection("overview")}><span className="ni">🗺️</span>Ward Overview</button>}
+          {(user.role === "supervisor" || user.role === "wardmaster" || isOverallNurse) && <button className={`nav-btn ${section === "reports" ? "active" : ""}`} onClick={() => setSection("reports")}><span className="ni">📊</span>Reports</button>}
+          {user.role === "nurse" && <button className={`nav-btn ${section === "wardreport" ? "active" : ""}`} onClick={() => setSection("wardreport")}><span className="ni">📝</span>Ward Report</button>}
           {isOverallNurse && (
-            <button className={`nav-btn ${section === "allwardsreport" ? "active" : ""}`} onClick={() => { setSection("allwardsreport"); setSidebarOpen(false); }} style={{ color: "var(--warning)" }}>
+            <button className={`nav-btn ${section === "allwardsreport" ? "active" : ""}`} onClick={() => setSection("allwardsreport")} style={{ color: "var(--warning)" }}>
               <span className="ni">📋</span>24hr Nurses Report
               <span style={{ marginLeft: "auto", background: "var(--warning)", color: "#000", fontSize: 9, fontWeight: 700, borderRadius: 10, padding: "1px 5px" }}>ALL</span>
             </button>
           )}
-          {(user.role === "supervisor" || user.role === "wardmaster") && <button className={`nav-btn ${section === "collation" ? "active" : ""}`} onClick={() => { setSection("collation"); setSidebarOpen(false); }}><span className="ni">👑</span>24hr Collation</button>}
+          {(user.role === "supervisor" || user.role === "wardmaster") && <button className={`nav-btn ${section === "collation" ? "active" : ""}`} onClick={() => setSection("collation")}><span className="ni">👑</span>24hr Collation</button>}
           <button className="nav-btn" onClick={() => openM("overallNurse")}><span className="ni">👑</span>Overall Nurse</button>
           <div className="nav-section">AI Tools</div>
           <button className="nav-btn" onClick={() => openM("aiChat")} style={{ color: "var(--purple)" }}><span className="ni">🤖</span>Ask Claude AI</button>
@@ -2157,14 +2655,13 @@ function MainApp({ user, onLogout }) {
       {/* Main */}
       <div className="main">
         <div className="topbar">
-          <button className="hamburger" onClick={() => setSidebarOpen(o => !o)}>☰</button>
           <div style={{ flexShrink: 0 }}>
             <div className="tb-title">{section === "overview" ? "Ward Overview" : section === "reports" ? "Reports" : section === "wardreport" ? "Ward Report" : section === "collation" ? "24hr Collation" : section === "allwardsreport" ? "24hr Nurses Report" : "Patients"}</div>
             <div className="tb-sub">
               {section === "patients" ? `${filtered.length} ${filter} patient${filtered.length !== 1 ? "s" : ""}` : section === "overview" ? `${patients.filter(p => (p.status || "active") === "active").length} active` : section === "wardreport" ? (user.ward || "No ward") : section === "collation" ? `${wardReports.filter(r => r.date === new Date().toISOString().split("T")[0]).length} reports today` : section === "allwardsreport" ? `${WARDS.length} wards · Overall Nurse view` : `${patients.length} total`}
             </div>
           </div>
-          <GlobalSearch patients={patients} onSelect={handleSelectPatient} />
+          <GlobalSearch patients={patients} onSelect={handleSelectPatient} user={user} />
           <div className="tb-right">
             <span className="badge-live"><span className="badge-dot" />Live</span>
             <button className="btn btn-ghost btn-sm" style={{ position: "relative" }} onClick={() => { setNotifOpen(o => !o); markRead(); }}>
@@ -2180,9 +2677,12 @@ function MainApp({ user, onLogout }) {
           {section === "allwardsreport" && <AllWardsReportSection wardReports={wardReports} archives={archives} user={user} showToast={showToast} />}
           {section === "collation" && <SupervisorCollationSection user={user} wardReports={wardReports} archives={archives} showToast={showToast} />}
           {section === "patients" && <>
-            <div className={`pt-panel ${selected ? "hidden" : ""}`}>
+            <div className="pt-panel">
               <div className="pt-panel-header">
-                <div className="pt-panel-title">Patient List</div>
+                <div className="pt-panel-title">
+                  {isNurse && user.ward ? `${user.ward.split("–")[0]?.trim()} Patients` : "Patient List"}
+                  {isNurse && user.ward && <div style={{fontSize:9,color:"var(--t3)",fontWeight:400,marginTop:1}}>Your ward only · Search EMR to view others</div>}
+                </div>
                 <div className="filter-tabs">
                   {[["active", "Active"], ["all", "All"], ["discharged", "D/C"]].map(([f, l]) => (
                     <button key={f} className={`filter-tab ${filter === f ? "active" : ""}`} onClick={() => setFilter(f)}>{l}</button>
@@ -2193,29 +2693,39 @@ function MainApp({ user, onLogout }) {
               <div className="pt-list">
                 {loading
                   ? <div style={{ textAlign: "center", padding: 20, color: "var(--t3)" }}>Loading patients…</div>
-                  : filtered.length === 0
-                    ? <div style={{ textAlign: "center", padding: "26px 10px", color: "var(--t3)", fontSize: 12 }}><div style={{ fontSize: 22, marginBottom: 5, opacity: 0.3 }}>📋</div>{filter === "active" ? "No active patients." : "No patients found."}</div>
-                    : filtered.map(p => {
-                      const hasCritical = checkVitalAlerts(p.vitals?.[0] || {}).some(a => a.level === "critical");
-                      return (
-                        <div key={p.id} className={`pt-card ${selectedId === p.id ? "active" : ""}`} onClick={() => setSelectedId(p.id)}>
-                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-                            <div className="pt-name">{p.name}</div>
-                            {hasCritical && <span style={{ fontSize: 12, color: "var(--danger)" }}>⚠️</span>}
-                          </div>
-                          <div className="pt-meta">
-                            <span>{p.ward?.split("–")[0]?.trim() || "—"}</span>
-                            <span className={`badge badge-${p.status || "active"}`}>{p.status || "Active"}</span>
-                          </div>
-                          <div style={{ fontSize: 10, color: "var(--t3)", marginTop: 2 }}>EMR: {p.emr || "—"} · {p.diagnosis || "No diagnosis"}</div>
-                        </div>
-                      );
-                    })}
+                  : <>
+                    {isNurse && !canSeeAllWards && <div style={{ padding: "7px 10px", fontSize: 11, color: "var(--t3)", borderBottom: "1px solid var(--border2)", background: "var(--bg3)" }}>🏥 {user.ward || "Your ward"}</div>}
+                    {filtered.length === 0
+                      ? <div style={{ textAlign: "center", padding: "26px 10px", color: "var(--t3)", fontSize: 12 }}><div style={{ fontSize: 22, marginBottom: 5, opacity: 0.3 }}>📋</div>{filter === "active" ? "No active patients." : "No patients found."}</div>
+                      : filtered.map(p => {
+                          const hasCritical = checkVitalAlerts(p.vitals?.[0] || {}).some(a => a.level === "critical");
+                          return (
+                            <div key={p.id} className={`pt-card ${selectedId === p.id ? "active" : ""}`} onClick={() => setSelectedId(p.id)}>
+                              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                                <div className="pt-name">{p.name}</div>
+                                {hasCritical && <span style={{ fontSize: 12, color: "var(--danger)" }}>⚠️</span>}
+                              </div>
+                              <div className="pt-meta">
+                                <span>{p.ward?.split("–")[0]?.trim() || "—"}</span>
+                                <span className={`badge badge-${p.status || "active"}`}>{p.status || "Active"}</span>
+                              </div>
+                              <div style={{ fontSize: 10, color: "var(--t3)", marginTop: 2 }}>EMR: {p.emr || "—"} · {p.diagnosis || "No diagnosis"}</div>
+                            </div>
+                          );
+                        })}
+                  </>}
               </div>
             </div>
             {selected
-              ? <><button onClick={() => setSelectedId(null)} style={{display:"none"}} className="mobile-back-btn">← Back to list</button><PatientDetail key={selected.id} patient={selected} user={user} onUpdate={handleUpdatePatient} toast={showToast} /></>
-              : <div className="pt-detail"><div className="empty-state"><div className="empty-icon">📋</div><div className="empty-text">No Patient Selected</div><div className="empty-sub">Select a patient from the list or add a new one.</div></div></div>}
+              ? <>
+                  {searchSelectedId === selected.id && (
+                    <div style={{ background: "rgba(251,191,36,.1)", border: "1px solid rgba(251,191,36,.3)", borderRadius: "var(--r)", padding: "8px 14px", marginBottom: 10, fontSize: 12, color: "var(--warning)", display: "flex", alignItems: "center", gap: 8 }}>
+                      🔍 Viewing patient from <strong style={{marginLeft:4}}>{selected.ward}</strong>&nbsp;— found via EMR search
+                    </div>
+                  )}
+                  <PatientDetail key={selected.id} patient={selected} user={user} onUpdate={handleUpdatePatient} toast={showToast} />
+                </>
+              : <div className="pt-detail"><div className="empty-state"><div className="empty-icon">📋</div><div className="empty-text">No Patient Selected</div><div className="empty-sub">{isNurse && !canSeeAllWards ? "Select a patient from your ward, or search by EMR number to view any patient." : "Select a patient from the list or add a new one."}</div></div></div>}
           </>}
         </div>
       </div>
@@ -2235,12 +2745,14 @@ export default function App() {
   const [user, setUser] = useState(null);
   const [checking, setChecking] = useState(true);
   useEffect(() => {
+    const authTimer = setTimeout(() => setChecking(false), 3000);
     const unsub = FB.onAuth(async (fbUser) => {
+      clearTimeout(authTimer);
       if (fbUser) { const p = await FB.getProfile(fbUser.uid); setUser(p ? { uid: fbUser.uid, email: fbUser.email, ...p } : null); }
       else setUser(null);
       setChecking(false);
     });
-    return () => unsub();
+    return () => { unsub(); clearTimeout(authTimer); };
   }, []);
   if (checking) return (
     <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "#0b1623" }}>
