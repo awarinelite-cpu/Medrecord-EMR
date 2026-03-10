@@ -1145,6 +1145,7 @@ function StatusModal({ open, onClose, onSave }) {
 
 function OverallNurseModal({ open, onClose, users, overallNurse, onAssign, onEnd }) {
   const [sel, setSel] = useState("");
+  const nurseOnly = users.filter(u => u.role === "nurse");
   return (
     <Modal open={open} onClose={onClose} title="👑 Overall Nurse of the Day">
       <div className="modal-body">
@@ -1155,13 +1156,13 @@ function OverallNurseModal({ open, onClose, users, overallNurse, onAssign, onEnd
         <div className="form-group"><label className="form-label">Assign Nurse</label>
           <select className="form-select" value={sel} onChange={e => setSel(e.target.value)}>
             <option value="">— Select nurse —</option>
-            {users.map(u => <option key={u.uid || u.id} value={u.uid || u.id}>{u.name} ({u.role})</option>)}
+            {nurseOnly.map(u => <option key={u.uid || u.id} value={u.uid || u.id}>{u.name}</option>)}
           </select>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
           <button className="btn btn-primary" style={{ flex: 1 }} onClick={() => {
             if (sel) {
-              const picked = users.find(u => (u.uid || u.id) === sel);
+              const picked = nurseOnly.find(u => (u.uid || u.id) === sel);
               if (picked) { onAssign({ name: picked.name, uid: picked.uid || picked.id }); setSel(""); }
             }
           }}>✅ Assign</button>
@@ -2698,8 +2699,8 @@ function MainApp({ user, onLogout }) {
         <div className="sb-nav">
           <div className="nav-section">Clinical</div>
           <button className={`nav-btn ${section === "patients" ? "active" : ""}`} onClick={() => { setSection("patients"); setSidebarOpen(false); }}><span className="ni">🏥</span>Patients</button>
-          <button className={`nav-btn ${section === "overview" ? "active" : ""}`} onClick={() => { setSection("overview"); setSidebarOpen(false); }}><span className="ni">🗺️</span>Ward Overview</button>
-          <button className={`nav-btn ${section === "reports" ? "active" : ""}`} onClick={() => { setSection("reports"); setSidebarOpen(false); }}><span className="ni">📊</span>Reports</button>
+          {(user.role === "supervisor" || user.role === "wardmaster") && <button className={`nav-btn ${section === "overview" ? "active" : ""}`} onClick={() => { setSection("overview"); setSidebarOpen(false); }}><span className="ni">🗺️</span>Ward Overview</button>}
+          {(user.role === "supervisor" || user.role === "wardmaster") && <button className={`nav-btn ${section === "reports" ? "active" : ""}`} onClick={() => { setSection("reports"); setSidebarOpen(false); }}><span className="ni">📊</span>Reports</button>}
           {user.role === "nurse" && <button className={`nav-btn ${section === "wardreport" ? "active" : ""}`} onClick={() => { setSection("wardreport"); setSidebarOpen(false); }}><span className="ni">📝</span>Ward Report</button>}
           {isOverallNurse && (
             <button className={`nav-btn ${section === "allwardsreport" ? "active" : ""}`} onClick={() => { setSection("allwardsreport"); setSidebarOpen(false); }} style={{ color: "var(--warning)" }}>
