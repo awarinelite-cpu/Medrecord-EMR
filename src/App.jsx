@@ -6780,6 +6780,8 @@ function HIRDDashboard({ user, onLogout }) {
 }
 
 
+// ─── ROOT ─────────────────────────────────────────────────────────────────────
+export default function App() {
   const [user, setUser] = useState(null);
   const [isAdmin, setIsAdmin] = useState(false);
   const [checking, setChecking] = useState(true);
