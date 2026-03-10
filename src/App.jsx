@@ -19,7 +19,13 @@ const db = getFirestore(firebaseApp);
 const FB = {
   register: async (email, password, profile) => {
     const cred = await createUserWithEmailAndPassword(auth, email, password);
-    await setDoc(doc(db, "users", cred.user.uid), { ...profile, uid: cred.user.uid, email, createdAt: serverTimestamp() });
+    await setDoc(doc(db, "users", cred.user.uid), {
+      ...profile,
+      uid: cred.user.uid,
+      email,
+      status: "pending", // Requires admin approval before login is granted
+      createdAt: serverTimestamp(),
+    });
     return { uid: cred.user.uid, email, ...profile };
   },
   login: (e, p) => signInWithEmailAndPassword(auth, e, p),
@@ -120,8 +126,8 @@ const nowTime = () => new Date().toTimeString().slice(0,5);
 const uid = () => Math.random().toString(36).slice(2,10);
 
 // ─── ADMIN CREDENTIALS ────────────────────────────────────────────────────────
-const ADMIN_EMAIL = "admin@gmail.com";
-const ADMIN_PASSWORD = "admin123";
+// Admin is identified by isAdmin:true flag in their Firestore user document.
+// No hardcoded credentials — admin logs in through Firebase Auth like any user.
 
 function checkVitalAlerts(v) {
   if (!v) return [];
@@ -718,6 +724,13 @@ const FBX = {
   },
   activateUser: async (uid) => {
     await updateDoc(doc(db,"users",uid),{suspended:false,suspendedAt:null});
+  },
+  // Approve or reject pending registrations
+  approveUser: async (uid) => {
+    await updateDoc(doc(db,"users",uid),{ status:"approved", approvedAt:serverTimestamp() });
+  },
+  rejectUser: async (uid) => {
+    await updateDoc(doc(db,"users",uid),{ status:"rejected", rejectedAt:serverTimestamp() });
   },
   // OTP / Email 2FA
   getEmailJSConfig: async () => {
@@ -1470,16 +1483,20 @@ function LoginPage({ onLogin }) {
     if (!loginData.email || !loginData.password) { showMsg("Enter your email and password."); return; }
     setBusy(true); setMsg(null);
     try {
-      // Admin bypasses OTP entirely
-      if (loginData.email.trim().toLowerCase() === ADMIN_EMAIL && loginData.password === ADMIN_PASSWORD) {
-        onLogin("__ADMIN__"); return;
-      }
-      // Staff login via Firebase Auth
+      // All users — including admin — authenticate through Firebase Auth
       const cred = await FB.login(loginData.email, loginData.password);
       const profile = await FB.getProfile(cred.user.uid);
       if (!profile) { showMsg("Account found but no profile. Contact administrator."); setBusy(false); return; }
       if (profile.deleted) { showMsg("This account has been deactivated. Contact administrator."); setBusy(false); return; }
       if (profile.suspended) { showMsg("This account has been suspended. Contact administrator."); setBusy(false); return; }
+      if (profile.status === "pending") { showMsg("Your account is awaiting admin approval. Please check back later."); await FB.logout(); setBusy(false); return; }
+      if (profile.status === "rejected") { showMsg("Your registration was not approved. Contact administrator."); await FB.logout(); setBusy(false); return; }
+
+      // Admin accounts bypass OTP (isAdmin flag in Firestore)
+      if (profile.isAdmin) {
+        onLogin({ uid: cred.user.uid, email: cred.user.email, ...profile, _isAdmin: true });
+        return;
+      }
 
       // Check if 2FA is enabled
       const twoFAEnabled = await FBX.get2FAEnabled();
@@ -1536,11 +1553,12 @@ function LoginPage({ onLogin }) {
   const doRegister = async () => {
     if (!regData.name||!regData.email||!regData.password||!regData.role) { showMsg("Fill in all required fields."); return; }
     if (regData.password !== regData.confirmPassword) { showMsg("Passwords do not match."); return; }
-    if (regData.password.length < 6) { showMsg("Password must be at least 6 characters."); return; }
+    if (regData.password.length < 8) { showMsg("Password must be at least 8 characters."); return; }
+    if (!/[0-9!@#$%^&*]/.test(regData.password)) { showMsg("Password must contain at least one number or special character (!@#$%^&*)."); return; }
     setBusy(true);
     try {
       await FB.register(regData.email, regData.password, { name:regData.name, role:regData.role, ward:regData.ward||"" });
-      showMsg("Account created! You can now sign in.", "success");
+      showMsg("Account created! Your request is pending admin approval before you can sign in.", "success");
       switchTab("login"); setLoginData({ email:regData.email, password:"" });
     } catch(e) { showMsg(e.code==="auth/email-already-in-use" ? "Email already registered." : e.message); }
     setBusy(false);
@@ -2779,6 +2797,25 @@ function SupervisorCollationSection({ user, wardReports, archives, showToast }) 
 }
 
 // ─── MAIN APP ─────────────────────────────────────────────────────────────────
+// ─── IDLE SESSION TIMEOUT ─────────────────────────────────────────────────────
+// Auto-logs out after 20 minutes of inactivity to protect patient data
+function useIdleTimeout(onTimeout, minutes = 20) {
+  const timer = useRef(null);
+  const reset = useCallback(() => {
+    clearTimeout(timer.current);
+    timer.current = setTimeout(onTimeout, minutes * 60 * 1000);
+  }, [onTimeout, minutes]);
+  useEffect(() => {
+    const events = ["mousemove", "keydown", "mousedown", "touchstart", "scroll"];
+    events.forEach(e => window.addEventListener(e, reset, { passive: true }));
+    reset(); // start timer
+    return () => {
+      clearTimeout(timer.current);
+      events.forEach(e => window.removeEventListener(e, reset));
+    };
+  }, [reset]);
+}
+
 function MainApp({ user, onLogout }) {
   const [patients, setPatients] = useState([]);
   const [selectedId, setSelectedId] = useState(null);
@@ -2799,6 +2836,9 @@ function MainApp({ user, onLogout }) {
   const [notifOpen, setNotifOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [toastState, showToast] = useToast();
+
+  // Auto-logout after 20 minutes of inactivity
+  useIdleTimeout(onLogout, 20);
 
   // Ward restriction: nurses only see their own ward patients
   const nurseWard = user.role === "nurse" ? (user.ward || null) : null;
@@ -3636,8 +3676,30 @@ function AdminUsers({ users, onRefresh, showToast }) {
   const [showAdd, setShowAdd] = useState(false);
   const [form, setForm] = useState({ name:"",email:"",password:"",role:"nurse",ward:"",department:"" });
   const [busy, setBusy] = useState(false);
+  const [userTab, setUserTab] = useState("active"); // "active" | "pending"
 
-  const visible = users.filter(u => !u.deleted && (
+  const pending = users.filter(u => !u.deleted && u.status === "pending");
+
+  const handleApprove = async (u) => {
+    try {
+      await FBX.approveUser(u.uid);
+      await FB.saveSystemLog("UPDATE", `Account approved: ${u.name} (${u.role})`);
+      showToast(`${u.name} approved and can now log in.`);
+      onRefresh();
+    } catch(e) { showToast("Error: " + e.message, "error"); }
+  };
+
+  const handleReject = async (u) => {
+    if (!window.confirm(`Reject and deny access for "${u.name}"?`)) return;
+    try {
+      await FBX.rejectUser(u.uid);
+      await FB.saveSystemLog("UPDATE", `Account rejected: ${u.name} (${u.email})`);
+      showToast(`${u.name}'s registration rejected.`, "error");
+      onRefresh();
+    } catch(e) { showToast("Error: " + e.message, "error"); }
+  };
+
+  const visible = users.filter(u => !u.deleted && u.status !== "pending" && (
     (roleFilter==="all" || u.role===roleFilter) &&
     (!search || u.name?.toLowerCase().includes(search.toLowerCase()) || u.email?.toLowerCase().includes(search.toLowerCase()))
   ));
@@ -3646,11 +3708,14 @@ function AdminUsers({ users, onRefresh, showToast }) {
 
   const handleAdd = async () => {
     if (!form.name||!form.email||!form.password) { showToast("Name, email and password are required.","error"); return; }
+    if (form.password.length < 8) { showToast("Password must be at least 8 characters.","error"); return; }
     setBusy(true);
     try {
-      await FB.register(form.email, form.password, { name:form.name, role:form.role, ward:form.ward, department:form.department });
-      await FB.saveSystemLog("CREATE",`New staff: ${form.name} (${form.role})`);
-      showToast("Staff account created."); setShowAdd(false);
+      const result = await FB.register(form.email, form.password, { name:form.name, role:form.role, ward:form.ward, department:form.department });
+      // Admin-created accounts are immediately approved
+      await FBX.approveUser(result.uid);
+      await FB.saveSystemLog("CREATE",`New staff added by admin: ${form.name} (${form.role})`);
+      showToast("Staff account created and approved."); setShowAdd(false);
       setForm({ name:"",email:"",password:"",role:"nurse",ward:"",department:"" }); onRefresh();
     } catch(e) { showToast("Error: "+e.message,"error"); }
     setBusy(false);
@@ -3730,21 +3795,53 @@ function AdminUsers({ users, onRefresh, showToast }) {
       <div className="adm-section-hdr">
         <div>
           <div className="adm-section-title">User Management</div>
-          <div className="adm-section-sub">{active.length} active · {suspended.length} suspended</div>
+          <div className="adm-section-sub">{active.length} active · {suspended.length} suspended{pending.length > 0 ? ` · ⚠️ ${pending.length} pending approval` : ""}</div>
         </div>
         <div style={{ display:"flex", gap:9, flexWrap:"wrap", alignItems:"center" }}>
-          {["all","nurse","supervisor","wardmaster"].map(r=>(
-            <button key={r} className="adm-btn adm-btn-ghost adm-btn-sm" style={roleFilter===r?{background:"#0d2b6b",color:"#fff"}:{}} onClick={()=>setRoleFilter(r)}>
-              {r==="all"?"All Roles":r==="nurse"?"Nurses":r==="supervisor"?"Supervisors":"Ward Masters"}
-            </button>
-          ))}
-          <div className="adm-search-bar"><span style={{color:"#8aa0cc"}}>🔍</span><input placeholder="Search staff…" value={search} onChange={e=>setSearch(e.target.value)} /></div>
+          <button className="adm-btn adm-btn-ghost adm-btn-sm" style={userTab==="active"?{background:"#0d2b6b",color:"#fff"}:{}} onClick={()=>setUserTab("active")}>Active Staff</button>
+          <button className="adm-btn adm-btn-ghost adm-btn-sm" style={userTab==="pending"?{background:"#b45309",color:"#fff"}:{}} onClick={()=>setUserTab("pending")}>
+            Pending {pending.length > 0 && <span style={{background:"#dc2626",color:"#fff",borderRadius:10,padding:"0 6px",fontSize:10,marginLeft:4}}>{pending.length}</span>}
+          </button>
+          {userTab==="active" && <>[
+            {["all","nurse","supervisor","wardmaster"].map(r=>(
+              <button key={r} className="adm-btn adm-btn-ghost adm-btn-sm" style={roleFilter===r?{background:"#0d2b6b",color:"#fff"}:{}} onClick={()=>setRoleFilter(r)}>
+                {r==="all"?"All Roles":r==="nurse"?"Nurses":r==="supervisor"?"Supervisors":"Ward Masters"}
+              </button>
+            ))}
+            <div className="adm-search-bar"><span style={{color:"#8aa0cc"}}>🔍</span><input placeholder="Search staff…" value={search} onChange={e=>setSearch(e.target.value)} /></div>
+          </>}
           <button className="adm-btn adm-btn-navy" onClick={()=>setShowAdd(true)}>+ Add Healthcare Worker</button>
         </div>
       </div>
 
-      <UserTable rows={active} isSuspended={false} />
-      {suspended.length > 0 && <UserTable rows={suspended} isSuspended={true} />}
+      {userTab === "pending" ? (
+        <div className="adm-card" style={{ marginBottom: 18 }}>
+          <div className="adm-card-hdr"><span className="adm-card-title">⏳ Pending Registration Approvals</span></div>
+          <div className="adm-card-body">
+            {pending.length === 0
+              ? <div className="adm-empty-state"><div className="adm-empty-icon">✅</div><div className="adm-empty-text">No pending approvals</div></div>
+              : pending.map(u => (
+                <div key={u.uid} style={{ display:"flex", alignItems:"center", justifyContent:"space-between", padding:"10px 0", borderBottom:"1px solid #e8edf7", gap:12, flexWrap:"wrap" }}>
+                  <div>
+                    <div style={{ fontWeight:900, fontSize:13 }}>{u.name}</div>
+                    <div style={{ fontSize:11, color:"#5a7399" }}>{u.email} · {u.role}{u.ward ? ` · ${u.ward}` : ""}</div>
+                    <div style={{ fontSize:10, color:"#8aa0cc", marginTop:2 }}>Registered: {u.createdAt?.toDate ? u.createdAt.toDate().toLocaleDateString() : "—"}</div>
+                  </div>
+                  <div style={{ display:"flex", gap:7 }}>
+                    <button className="adm-btn adm-btn-sm" style={{ background:"#059669",color:"#fff" }} onClick={()=>handleApprove(u)}>✓ Approve</button>
+                    <button className="adm-btn adm-btn-sm adm-btn-danger" onClick={()=>handleReject(u)}>✕ Reject</button>
+                  </div>
+                </div>
+              ))
+            }
+          </div>
+        </div>
+      ) : (
+        <>
+          <UserTable rows={active} isSuspended={false} />
+          {suspended.length > 0 && <UserTable rows={suspended} isSuspended={true} />}
+        </>
+      )}
 
       {showAdd && (
         <div className="adm-overlay" onMouseDown={e=>{ if(e.target===e.currentTarget) setShowAdd(false); }}>
@@ -7060,12 +7157,12 @@ export default function App() {
     </div>
   );
 
-  if (isAdmin) return <AdminApp onLogout={()=>setIsAdmin(false)} />;
+  if (isAdmin) return <AdminApp onLogout={()=>{ FB.logout(); setIsAdmin(false); }} />;
 
   if (!user) return (
     <><style>{css}</style>
     <LoginPage onLogin={(u) => {
-      if (u==="__ADMIN__") { setIsAdmin(true); return; }
+      if (u?._isAdmin) { setIsAdmin(true); return; }
       setUser(u);
     }} /></>
   );
