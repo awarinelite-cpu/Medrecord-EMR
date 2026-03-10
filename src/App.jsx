@@ -4,23 +4,14 @@ import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, si
 import { getFirestore, doc, setDoc, getDoc, collection, onSnapshot, serverTimestamp, query, orderBy, getDocs, addDoc, updateDoc } from "firebase/firestore";
 
 const firebaseConfig = {
-  apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
-  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
-  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
-  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
-  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
-  appId: import.meta.env.VITE_FIREBASE_APP_ID,
-  measurementId: import.meta.env.VITE_FIREBASE_MEASUREMENT_ID,
+  apiKey: "AIzaSyD91f4UJKPXZEpfXV_QoggsZq1R_9WcC4s",
+  authDomain: "the-elites-nurses.firebaseapp.com",
+  projectId: "the-elites-nurses",
+  storageBucket: "the-elites-nurses.firebasestorage.app",
+  messagingSenderId: "44425476386",
+  appId: "1:44425476386:web:98be1e3e6a34c403eccd7b",
+  measurementId: "G-T4BELKJMZR"
 };
-```
-
----
-
-## Step 3 — Add `.env` to `.gitignore`
-
-Open your `.gitignore` file (also in project root) and add this line:
-```
-.env
 const firebaseApp = initializeApp(firebaseConfig);
 const auth = getAuth(firebaseApp);
 const db = getFirestore(firebaseApp);
@@ -151,10 +142,26 @@ function checkVitalAlerts(v) {
   return a;
 }
 
+// ─── AI PROXY ─────────────────────────────────────────────────────────────────
+// The Anthropic API key is stored in Firestore settings (admin-only write access)
+// and fetched once per session. It is NEVER hardcoded in the frontend bundle.
+let _cachedApiKey = null;
+async function getApiKey() {
+  if (_cachedApiKey) return _cachedApiKey;
+  const snap = await getDoc(doc(db, "settings", "aiConfig"));
+  if (!snap.exists() || !snap.data().anthropicKey) {
+    throw new Error("AI is not configured. Ask your administrator to add the API key in System Settings.");
+  }
+  _cachedApiKey = snap.data().anthropicKey;
+  return _cachedApiKey;
+}
+
 const AI = {
   async call(system, user, maxTokens=800) {
+    const apiKey = await getApiKey();
     const res = await fetch("https://api.anthropic.com/v1/messages", {
-      method:"POST", headers:{"Content-Type":"application/json"},
+      method:"POST",
+      headers:{ "Content-Type":"application/json", "x-api-key": apiKey, "anthropic-version":"2023-06-01", "anthropic-dangerous-direct-browser-access":"true" },
       body: JSON.stringify({ model:"claude-sonnet-4-20250514", max_tokens:maxTokens, system, messages:[{role:"user",content:user}] })
     });
     if (!res.ok) throw new Error("API error " + res.status);
@@ -748,6 +755,14 @@ const FBX = {
   },
   saveEmailJSConfig: async (cfg) => {
     await setDoc(doc(db,"settings","emailjs"),{...cfg,updatedAt:serverTimestamp()});
+  },
+  getAiConfig: async () => {
+    const s = await getDoc(doc(db,"settings","aiConfig"));
+    return s.exists() ? s.data() : null;
+  },
+  saveAiConfig: async (cfg) => {
+    _cachedApiKey = null; // invalidate cache when key is updated
+    await setDoc(doc(db,"settings","aiConfig"),{...cfg,updatedAt:serverTimestamp()});
   },
   get2FAEnabled: async () => {
     const s = await getDoc(doc(db,"settings","2fa"));
@@ -1445,6 +1460,21 @@ function LoginPage({ onLogin }) {
   const [msg, setMsg] = useState(null);
   const [busy, setBusy] = useState(false);
 
+  // Login rate limiting — max 5 attempts then 30s lockout
+  const [loginAttempts, setLoginAttempts] = useState(0);
+  const [lockoutUntil, setLockoutUntil] = useState(0);
+  const [lockoutRemaining, setLockoutRemaining] = useState(0);
+
+  useEffect(() => {
+    if (lockoutUntil <= 0) return;
+    const interval = setInterval(() => {
+      const remaining = Math.ceil((lockoutUntil - Date.now()) / 1000);
+      if (remaining <= 0) { setLockoutUntil(0); setLockoutRemaining(0); setLoginAttempts(0); clearInterval(interval); }
+      else setLockoutRemaining(remaining);
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [lockoutUntil]);
+
   // OTP screen state
   const [otp, setOtp] = useState({
     active: false,
@@ -1490,6 +1520,7 @@ function LoginPage({ onLogin }) {
 
   const doLogin = async () => {
     if (!loginData.email || !loginData.password) { showMsg("Enter your email and password."); return; }
+    if (Date.now() < lockoutUntil) { showMsg(`Too many failed attempts. Please wait ${lockoutRemaining}s before trying again.`, "error"); return; }
     setBusy(true); setMsg(null);
     try {
       // All users — including admin — authenticate through Firebase Auth
@@ -1500,6 +1531,9 @@ function LoginPage({ onLogin }) {
       if (profile.suspended) { showMsg("This account has been suspended. Contact administrator."); setBusy(false); return; }
       if (profile.status === "pending") { showMsg("Your account is awaiting admin approval. Please check back later."); await FB.logout(); setBusy(false); return; }
       if (profile.status === "rejected") { showMsg("Your registration was not approved. Contact administrator."); await FB.logout(); setBusy(false); return; }
+
+      // Successful auth — reset attempt counter
+      setLoginAttempts(0); setLockoutUntil(0);
 
       // Admin accounts bypass OTP (isAdmin flag in Firestore)
       if (profile.isAdmin) {
@@ -1526,7 +1560,21 @@ function LoginPage({ onLogin }) {
       setBusy(false);
       await dispatchOTP(userProfile, ejsCfg);
     } catch(e) {
-      showMsg(e.code==="auth/invalid-credential" ? "Incorrect email or password." : e.message);
+      // Track failed credential attempts and apply lockout
+      if (e.code === "auth/invalid-credential" || e.code === "auth/wrong-password") {
+        const newAttempts = loginAttempts + 1;
+        setLoginAttempts(newAttempts);
+        if (newAttempts >= 5) {
+          const until = Date.now() + 30 * 1000;
+          setLockoutUntil(until);
+          setLockoutRemaining(30);
+          showMsg("Too many failed attempts. Account locked for 30 seconds.", "error");
+        } else {
+          showMsg(`Incorrect email or password. ${5 - newAttempts} attempt(s) remaining.`);
+        }
+      } else {
+        showMsg(e.message);
+      }
     }
     setBusy(false);
   };
@@ -1663,10 +1711,15 @@ function LoginPage({ onLogin }) {
           <button className={`tab-switch-btn ${tab==="forgot"?"active":""}`} onClick={()=>switchTab("forgot")}>Forgot</button>
         </div>
         {tab==="login" && <>
-          <div className="form-group"><label className="form-label">Email Address</label><input className="form-input" type="email" placeholder="your@email.com" value={loginData.email} onChange={e=>setLoginData(d=>({...d,email:e.target.value}))} onKeyDown={e=>e.key==="Enter"&&doLogin()} /></div>
-          <div className="form-group"><label className="form-label">Password</label><input className="form-input" type="password" placeholder="Enter password" value={loginData.password} onChange={e=>setLoginData(d=>({...d,password:e.target.value}))} onKeyDown={e=>e.key==="Enter"&&doLogin()} /></div>
+          <div className="form-group"><label className="form-label">Email Address</label><input className="form-input" type="email" placeholder="your@email.com" value={loginData.email} onChange={e=>setLoginData(d=>({...d,email:e.target.value}))} onKeyDown={e=>e.key==="Enter"&&doLogin()} disabled={lockoutUntil > Date.now()} /></div>
+          <div className="form-group"><label className="form-label">Password</label><input className="form-input" type="password" placeholder="Enter password" value={loginData.password} onChange={e=>setLoginData(d=>({...d,password:e.target.value}))} onKeyDown={e=>e.key==="Enter"&&doLogin()} disabled={lockoutUntil > Date.now()} /></div>
+          {lockoutUntil > Date.now() && (
+            <div className="form-error" style={{ textAlign:"center", fontSize:13 }}>
+              🔒 Too many failed attempts.<br/>Try again in <strong>{lockoutRemaining}s</strong>
+            </div>
+          )}
           {msg && <div className={msg.type==="error"?"form-error":"form-success"}>{msg.text}</div>}
-          <button className="btn btn-primary btn-lg" style={{marginTop:13}} onClick={doLogin} disabled={busy}>{busy?<Spinner/>:"Sign In"}</button>
+          <button className="btn btn-primary btn-lg" style={{marginTop:13}} onClick={doLogin} disabled={busy || lockoutUntil > Date.now()}>{busy?<Spinner/>:"Sign In"}</button>
           <div style={{textAlign:"center",marginTop:10}}><button onClick={()=>switchTab("forgot")} style={{background:"none",border:"none",color:"var(--accent)",fontSize:12,cursor:"pointer",textDecoration:"underline"}}>Forgot password?</button></div>
         </>}
         {tab==="forgot" && <>
@@ -3507,7 +3560,7 @@ function AdminAnnouncements({ announcements, showToast }) {
     if (!form.title || !form.body) { showToast("Title and message are required.", "error"); return; }
     setBusy(true);
     try {
-      await FB.saveAnnouncement({ ...form, postedBy: ADMIN_EMAIL });
+      await FB.saveAnnouncement({ ...form, postedBy: "admin" });
       await FB.saveSystemLog("CREATE", `Announcement posted: "${form.title}"`);
       showToast("Announcement posted successfully.");
       setForm({ title: "", body: "", priority: "info", targetRole: "all" });
@@ -4779,6 +4832,55 @@ function AdminAnalytics({ patients, users, wardReports, bills }) {
   );
 }
 
+// ── AI KEY CONFIG (inside AdminSettings) ──────────────────────────────────────
+function AiKeyConfig({ showToast }) {
+  const [key, setKey] = useState("");
+  const [saved, setSaved] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [show, setShow] = useState(false);
+
+  useEffect(() => {
+    FBX.getAiConfig().then(c => { if (c?.anthropicKey) { setKey(c.anthropicKey); setSaved(true); } }).catch(()=>{});
+  }, []);
+
+  const handleSave = async () => {
+    if (!key.trim().startsWith("sk-ant-")) { showToast("Invalid key format. Anthropic keys start with sk-ant-", "error"); return; }
+    setSaving(true);
+    try {
+      await FBX.saveAiConfig({ anthropicKey: key.trim() });
+      await FB.saveSystemLog("UPDATE", "Anthropic API key updated");
+      setSaved(true);
+      showToast("AI API key saved securely to Firestore.");
+    } catch(e) { showToast("Error: " + e.message, "error"); }
+    setSaving(false);
+  };
+
+  return (
+    <div>
+      <div className="adm-form-group">
+        <label className="adm-label">Anthropic API Key</label>
+        <div style={{ display:"flex", gap:8, alignItems:"center" }}>
+          <input
+            className="adm-input"
+            type={show ? "text" : "password"}
+            placeholder="sk-ant-api03-..."
+            value={key}
+            onChange={e => { setKey(e.target.value); setSaved(false); }}
+            style={{ fontFamily:"monospace", flex:1 }}
+          />
+          <button className="adm-btn adm-btn-ghost adm-btn-sm" onClick={() => setShow(s => !s)}>{show ? "🙈 Hide" : "👁 Show"}</button>
+        </div>
+      </div>
+      <div style={{ display:"flex", gap:10, alignItems:"center" }}>
+        <button className="adm-btn adm-btn-navy" onClick={handleSave} disabled={saving || !key}>
+          {saving ? "Saving…" : "💾 Save API Key"}
+        </button>
+        {saved && <span className="adm-badge adm-badge-green">✓ Key saved</span>}
+      </div>
+    </div>
+  );
+}
+
 // ── ENHANCED AdminSettings with 2FA Config ────────────────────────────────────
 function AdminSettings({ showToast }) {
   const [twoFAEnabled, setTwoFAEnabled] = useState(false);
@@ -4898,13 +5000,24 @@ function AdminSettings({ showToast }) {
           </div>
         </div>
 
+        {/* AI Config */}
+        <div className="adm-card">
+          <div className="adm-card-hdr"><span className="adm-card-title">🤖 AI Configuration (Anthropic)</span></div>
+          <div className="adm-card-body">
+            <div className="adm-notice adm-notice-info" style={{ marginBottom:14 }}>
+              ℹ️ Your Anthropic API key is stored securely in Firestore and fetched at runtime — it is never embedded in the app bundle. Get a key at <strong>console.anthropic.com</strong>.
+            </div>
+            <AiKeyConfig showToast={showToast} />
+          </div>
+        </div>
+
         {/* Admin Credentials */}
         <div className="adm-card">
-          <div className="adm-card-hdr"><span className="adm-card-title">🛡️ Admin Credentials</span></div>
+          <div className="adm-card-hdr"><span className="adm-card-title">🛡️ Admin Account</span></div>
           <div className="adm-card-body">
-            <div className="adm-notice adm-notice-info">ℹ️ Admin credentials are configured in the application source code.</div>
+            <div className="adm-notice adm-notice-info">ℹ️ Admin is identified by the <strong>isAdmin: true</strong> flag on their Firestore user document. Use the Firebase console to set or revoke admin status.</div>
             <div style={{ fontSize:13, fontWeight:700, lineHeight:2.2, color:"#1a2e5a" }}>
-              <div>Email: <span style={{ color:"#0d2b6b", fontWeight:900 }}>{ADMIN_EMAIL}</span></div>
+              <div>Auth: <span style={{ fontWeight:900 }}>Firebase Authentication</span></div>
               <div>Role: <span className="adm-badge adm-badge-gold">System Administrator</span></div>
               <div>Access Level: <span style={{ fontWeight:900, color:"#0d2b6b" }}>Full System Control</span></div>
               <div>2FA: <span className="adm-badge adm-badge-navy" style={{fontSize:11}}>Exempt — Direct Login</span></div>
@@ -5061,7 +5174,7 @@ function AdminApp({ onLogout }) {
           </div>
           <div className="adm-topbar-right">
             <div className="adm-live-badge"><div className="adm-live-dot" />System Online</div>
-            <span className="adm-topbar-email">{ADMIN_EMAIL}</span>
+            <span className="adm-topbar-email">Administrator</span>
           </div>
         </div>
         <div className="adm-content">
@@ -5832,7 +5945,7 @@ function PharmacyDashboard({user,onLogout}){
 
 function PharmInteractionChecker({patient,showToast}){
   const [result,setResult]=useState("");const [loading,setLoading]=useState(false);
-  const check=async()=>{setLoading(true);setResult("");try{const list=(patient.prescriptions||[]).map(m=>`${m.drug} ${m.dosage} ${m.route} ${m.freq}`).join(", ");const r=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:1000,system:"You are a clinical pharmacist. Check for drug interactions and flag any concerns. Be concise.",messages:[{role:"user",content:`Check these for interactions: ${list}`}]})});const d=await r.json();setResult(d.content?.map(c=>c.text||"").join("")||"No interactions found.");}catch(e){setResult("Error: "+e.message);}setLoading(false);};
+  const check=async()=>{setLoading(true);setResult("");try{const list=(patient.prescriptions||[]).map(m=>`${m.drug} ${m.dosage} ${m.route} ${m.freq}`).join(", ");const text=await AI.call("You are a clinical pharmacist. Check for drug interactions and flag any concerns. Be concise.",`Check these for interactions: ${list}`,1000);setResult(text||"No interactions found.");}catch(e){setResult("Error: "+e.message);}setLoading(false);};
   return (<div>
     <div style={{marginBottom:12}}>{(patient.prescriptions||[]).map(m=><div key={m.id} style={{background:"#f8fafc",border:"1px solid #dce6f5",borderRadius:8,padding:"7px 12px",marginBottom:6,display:"flex",justifyContent:"space-between"}}><span style={{fontWeight:700,fontSize:13}}>{m.drug}</span><span style={{fontSize:12,color:"#4a6a8a"}}>{m.dosage} · {m.route} · {m.freq}</span></div>)}</div>
     <button className="dept-send-btn" onClick={check} disabled={loading}>{loading?<><span className="ai-spinner"/>Checking…</>:"🤖 Check with AI"}</button>
@@ -6539,8 +6652,7 @@ function AdherenceForm({patient,officer,onSave,showToast}){
 // ── AI helpers for pharmacy ──────────────────────────────────────────────────
 if(!AI.checkInteractions){AI.checkInteractions=async(prescriptions)=>{
   const list=prescriptions.map(m=>`${m.drug} ${m.dosage} ${m.route} ${m.freq}`).join(", ");
-  const r=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:1000,system:"You are a clinical pharmacist. Check for drug interactions, contraindications, and provide brief dosing notes. Be concise.",messages:[{role:"user",content:`Check these medications for drug interactions and flag any concerns:\n${list}`}]})});
-  const d=await r.json();return d.content?.map(c=>c.text||"").join("")||"No interactions found.";
+  return await AI.call("You are a clinical pharmacist. Check for drug interactions, contraindications, and provide brief dosing notes. Be concise.",`Check these medications for drug interactions and flag any concerns:\n${list}`,1000);
 };}
 
 
