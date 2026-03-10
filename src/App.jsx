@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { initializeApp } from "firebase/app";
 import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, onAuthStateChanged, sendPasswordResetEmail } from "firebase/auth";
-import { getFirestore, doc, setDoc, getDoc, collection, onSnapshot, serverTimestamp, query, orderBy, getDocs, addDoc, updateDoc } from "firebase/firestore";
+import { getFirestore, doc, setDoc, getDoc, collection, onSnapshot, serverTimestamp, query, orderBy, where, limit, getDocs, addDoc, updateDoc } from "firebase/firestore";
 
 const firebaseConfig = {
   apiKey: "AIzaSyD91f4UJKPXZEpfXV_QoggsZq1R_9WcC4s",
@@ -29,7 +29,14 @@ const FB = {
   getProfile: async (uid) => { const s = await getDoc(doc(db, "users", uid)); return s.exists() ? s.data() : null; },
   getUsers: async () => { const s = await getDocs(collection(db, "users")); return s.docs.map(d => d.data()); },
   savePatient: async (p) => { await setDoc(doc(db, "patients", p.id), { ...p, updatedAt: serverTimestamp() }); },
-  onPatients: (cb) => { const q = query(collection(db, "patients"), orderBy("createdAt", "desc")); return onSnapshot(q, s => cb(s.docs.map(d => d.data()))); },
+  onPatients: (cb, ward) => {
+    // For nurses: server-side filter by ward. Always exclude deleted docs.
+    const constraints = ward
+      ? [where("ward", "==", ward), where("deleted", "!=", true), orderBy("deleted"), orderBy("createdAt", "desc"), limit(200)]
+      : [where("deleted", "!=", true), orderBy("deleted"), orderBy("createdAt", "desc"), limit(500)];
+    const q = query(collection(db, "patients"), ...constraints);
+    return onSnapshot(q, { includeMetadataChanges: false }, s => cb(s.docs.map(d => d.data())));
+  },
   saveSettings: async (key, data) => { await setDoc(doc(db, "settings", key), { ...data, updatedAt: serverTimestamp() }); },
   onSettings: (key, cb) => onSnapshot(doc(db, "settings", key), s => cb(s.exists() ? s.data() : null)),
   // 24hr ward reports
@@ -39,8 +46,8 @@ const FB = {
     return id;
   },
   onWardReports: (cb) => {
-    const q = query(collection(db, "wardReports"), orderBy("date", "desc"));
-    return onSnapshot(q, s => cb(s.docs.map(d => d.data())));
+    const q = query(collection(db, "wardReports"), orderBy("date", "desc"), limit(200));
+    return onSnapshot(q, { includeMetadataChanges: false }, s => cb(s.docs.map(d => d.data())));
   },
   save24hrArchive: async (data) => {
     const id = data.id || ("AR-" + Math.random().toString(36).slice(2,10));
@@ -48,8 +55,8 @@ const FB = {
     return id;
   },
   on24hrArchives: (cb) => {
-    const q = query(collection(db, "shiftArchives"), orderBy("archivedAt", "desc"));
-    return onSnapshot(q, s => cb(s.docs.map(d => d.data())));
+    const q = query(collection(db, "shiftArchives"), orderBy("archivedAt", "desc"), limit(50));
+    return onSnapshot(q, { includeMetadataChanges: false }, s => cb(s.docs.map(d => d.data())));
   },
   updateUserRole: async (uid, role) => { await updateDoc(doc(db, "users", uid), { role }); },
   deactivateUser: async (uid) => { await setDoc(doc(db, "users", uid), { deleted: true, deletedAt: serverTimestamp() }, { merge: true }); },
@@ -803,7 +810,7 @@ function NotifPanel({ open, notifs, unread, onMarkRead, onClose, onSelectPatient
 }
 
 // ─── GLOBAL SEARCH ────────────────────────────────────────────────────────────
-function GlobalSearch({ patients, onSelect }) {
+function GlobalSearch({ patients, onSelect, user }) {
   const [q, setQ] = useState("");
   const [open, setOpen] = useState(false);
   const ref = useRef();
@@ -812,20 +819,30 @@ function GlobalSearch({ patients, onSelect }) {
     document.addEventListener("mousedown", h);
     return () => document.removeEventListener("mousedown", h);
   }, []);
+  const isNurse = user?.role === "nurse";
+  const nurseWard = user?.ward || "";
   const results = q.length > 1
-    ? patients.filter(p =>
-      p.name?.toLowerCase().includes(q.toLowerCase()) ||
-      p.emr?.toLowerCase().includes(q.toLowerCase()) ||
-      p.diagnosis?.toLowerCase().includes(q.toLowerCase()) ||
-      p.ward?.toLowerCase().includes(q.toLowerCase())
-    ).slice(0, 8) : [];
+    ? patients.filter(p => {
+        const qLow = q.toLowerCase();
+        const emrMatch = p.emr?.toLowerCase().includes(qLow);
+        if (isNurse) {
+          if (emrMatch) return true;
+          if (nurseWard && p.ward !== nurseWard) return false;
+          return p.name?.toLowerCase().includes(qLow) || p.diagnosis?.toLowerCase().includes(qLow);
+        }
+        return (
+          p.name?.toLowerCase().includes(qLow) || emrMatch ||
+          p.diagnosis?.toLowerCase().includes(qLow) || p.ward?.toLowerCase().includes(qLow)
+        );
+      }).slice(0, 8) : [];
   return (
     <div ref={ref} className="tb-search">
       <span style={{ color: "var(--t3)", fontSize: 14, flexShrink: 0 }}>🔍</span>
-      <input placeholder="Search by name, EMR, diagnosis, ward…" value={q} onChange={e => { setQ(e.target.value); setOpen(true); }} onFocus={() => setOpen(true)} />
+      <input placeholder={isNurse ? "Search EMR to find any patient…" : "Search by name, EMR, diagnosis, ward…"} value={q} onChange={e => { setQ(e.target.value); setOpen(true); }} onFocus={() => setOpen(true)} />
       {q && <button onClick={() => { setQ(""); setOpen(false); }} style={{ background: "none", border: "none", color: "var(--t3)", cursor: "pointer", fontSize: 14 }}>✕</button>}
       {open && q.length > 1 && (
         <div className="search-dropdown">
+          {isNurse && <div style={{ padding: "5px 14px", fontSize: 11, color: "var(--t3)", borderBottom: "1px solid var(--border)", background: "var(--bg2)" }}>🔒 Your ward only · Use EMR number to find patients in other wards</div>}
           {results.length === 0
             ? <div style={{ padding: "12px 14px", color: "var(--t3)", fontSize: 13 }}>No results for "{q}"</div>
             : results.map(p => (
@@ -2642,15 +2659,24 @@ function MainApp({ user, onLogout }) {
   const closeM = (m) => setModals(x => ({ ...x, [m]: false }));
 
   useEffect(() => {
-    const unsubPt = FB.onPatients(pts => { setPatients(pts); setLoading(false); });
+    // Nurses: fetch only their ward server-side (fast). Others: fetch all.
+    const nurseWard = user.role === "nurse" ? (user.ward || null) : null;
+    const unsubPt = FB.onPatients(pts => { setPatients(pts); setLoading(false); }, nurseWard);
     const unsubNurse = FB.onSettings("overallNurse", d => setOverallNurse(d?.name ? { name: d.name, uid: d.uid || null } : null));
+    // Stagger secondary listeners so patient data loads first
+    const t = setTimeout(() => {
+      FB.getUsers().then(setAllUsers).catch(() => {});
+    }, 500);
     const unsubWR = FB.onWardReports(setWardReports);
     const unsubAR = FB.on24hrArchives(setArchives);
-    FB.getUsers().then(setAllUsers).catch(() => {});
-    return () => { unsubPt(); unsubNurse(); unsubWR(); unsubAR(); };
+    return () => { unsubPt(); unsubNurse(); unsubWR(); unsubAR(); clearTimeout(t); };
   }, []);
 
+  const isNurse = user.role === "nurse";
   const filtered = patients.filter(p => {
+    if (p.deleted) return false;
+    // Nurses: server query already scopes by ward, but guard client-side too
+    if (isNurse && user.ward && p.ward !== user.ward) return false;
     if (filter === "active") return (p.status || "active") === "active";
     if (filter === "discharged") return p.status === "discharged";
     return true;
@@ -2750,7 +2776,7 @@ function MainApp({ user, onLogout }) {
               {section === "patients" ? `${filtered.length} ${filter} patient${filtered.length !== 1 ? "s" : ""}` : section === "overview" ? `${patients.filter(p => (p.status || "active") === "active").length} active` : section === "wardreport" ? (user.ward || "No ward") : section === "collation" ? `${wardReports.filter(r => r.date === new Date().toISOString().split("T")[0]).length} reports today` : section === "allwardsreport" ? `${WARDS.length} wards · Overall Nurse view` : `${patients.length} total`}
             </div>
           </div>
-          <GlobalSearch patients={patients} onSelect={handleSelectPatient} />
+          <GlobalSearch patients={patients} onSelect={handleSelectPatient} user={user} />
           <div className="tb-right">
             <span className="badge-live"><span className="badge-dot" />Live</span>
             <button className="btn btn-ghost btn-sm" style={{ position: "relative" }} onClick={() => { setNotifOpen(o => !o); markRead(); }}>
