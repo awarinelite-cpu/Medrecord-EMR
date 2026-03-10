@@ -71,6 +71,29 @@ const FB = {
     return onSnapshot(q, s => cb(s.docs.map(d => d.data())));
   },
   deletePatient: async (id) => { await setDoc(doc(db, "patients", id), { deleted: true, deletedAt: serverTimestamp() }, { merge: true }); },
+  // Doctor call notes — saved to Firestore so nurses get real-time updates
+  saveDoctorNote: async (patientId, note) => {
+    const id = "DN-" + Math.random().toString(36).slice(2,10);
+    await setDoc(doc(db, "doctorNotes", id), { ...note, id, patientId, createdAt: serverTimestamp() });
+    return id;
+  },
+  onDoctorNotes: (patientId, cb) => {
+    const q = query(collection(db, "doctorNotes"), orderBy("createdAt", "desc"));
+    return onSnapshot(q, s => cb(s.docs.map(d => d.data()).filter(n => n.patientId === patientId)));
+  },
+  onAllDoctorNotes: (cb) => {
+    const q = query(collection(db, "doctorNotes"), orderBy("createdAt", "desc"));
+    return onSnapshot(q, s => cb(s.docs.map(d => d.data())));
+  },
+  // Patient-level change notifications (drugs added, notes added, etc.)
+  savePatientAlert: async (data) => {
+    const id = "PA-" + Math.random().toString(36).slice(2,10);
+    await setDoc(doc(db, "patientAlerts", id), { ...data, id, createdAt: serverTimestamp() });
+  },
+  onPatientAlerts: (cb) => {
+    const q = query(collection(db, "patientAlerts"), orderBy("createdAt", "desc"));
+    return onSnapshot(q, s => cb(s.docs.map(d => d.data()).filter(a => !a.deleted)));
+  },
 };
 
 const WARDS = ["Ward A – General Medicine","Ward B – Surgical","Ward C – Pediatrics","Ward D – Cardiology","Ward E – Orthopedics","Ward F – ICU","Ward G – Maternity","Ward H – Oncology"];
@@ -593,7 +616,34 @@ tr:hover td{background:var(--td-hover);}
 ::-webkit-scrollbar-thumb{background:var(--border2);border-radius:3px}
 `;
 
-// ─── UTILITY ──────────────────────────────────────────────────────────────────
+// ─── GLOBAL THEME STATE ───────────────────────────────────────────────────────
+// Shared across all dashboards via localStorage
+function getStoredTheme() {
+  try { return localStorage.getItem("medrecord_theme") || "light"; } catch(e) { return "light"; }
+}
+function setStoredTheme(t) {
+  try { localStorage.setItem("medrecord_theme", t); } catch(e) {}
+}
+
+// ─── ALARM SOUND UTILITY ──────────────────────────────────────────────────────
+function playAlarm(type = "normal") {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const freqs = type === "critical" ? [880, 1100, 880, 1100] : type === "drug" ? [660, 880] : [440, 550];
+    let t = ctx.currentTime;
+    freqs.forEach(freq => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain); gain.connect(ctx.destination);
+      osc.frequency.setValueAtTime(freq, t);
+      gain.gain.setValueAtTime(0.3, t);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + 0.3);
+      osc.start(t); osc.stop(t + 0.3);
+      t += 0.35;
+    });
+  } catch(e) {}
+}
+
 
 // ── New FB methods for restructured features ──────────────────────────────────
 const FBX = {
@@ -751,25 +801,50 @@ function useToast() {
 }
 
 // ─── NOTIFICATIONS ────────────────────────────────────────────────────────────
-function useNotifications(patients) {
+function useNotifications(patients, wardFilter) {
   const [notifs, setNotifs] = useState([]);
-  // Use a stable key map so read-state survives Firestore re-renders
+  const [patientAlerts, setPatientAlerts] = useState([]);
   const readSet = useRef(new Set());
+  const prevAlertsRef = useRef([]);
+
+  // Listen to real-time patient alerts (doctor notes, new drugs)
+  useEffect(() => {
+    const unsub = FB.onPatientAlerts(alerts => {
+      // Detect NEW alerts and play alarm
+      const newAlerts = alerts.filter(a => {
+        if (readSet.current.has(a.id)) return false;
+        const isNew = !prevAlertsRef.current.find(p => p.id === a.id);
+        return isNew;
+      });
+      if (newAlerts.length > 0) {
+        const hasDrug = newAlerts.some(a => a.type === "new_drug");
+        const hasNote = newAlerts.some(a => a.type === "doctor_note");
+        if (hasDrug) playAlarm("drug");
+        else if (hasNote) setTimeout(() => playAlarm("normal"), 400);
+      }
+      prevAlertsRef.current = alerts;
+      setPatientAlerts(alerts);
+    });
+    return () => unsub();
+  }, []);
 
   useEffect(() => {
     const n = [];
     const td = today();
-    // Only active patients generate notifications
-    patients.filter(p => (p.status || "active") === "active").forEach(p => {
+    // Filter patients for ward-restricted nurses
+    const myPatients = wardFilter
+      ? patients.filter(p => p.ward === wardFilter)
+      : patients;
+
+    myPatients.filter(p => (p.status || "active") === "active").forEach(p => {
       const v = p.vitals?.[0];
       if (v) checkVitalAlerts(v).forEach(a => {
         const stableId = `vital-${p.id}-${a.msg}`;
         n.push({ id: stableId, patientId: p.id, patientName: p.name, ward: p.ward, ...a, time: v.recordedAt || new Date().toISOString(), read: readSet.current.has(stableId) });
       });
-      // Only prescriptions that haven't ended and have no same-day admin log
       (p.prescriptions || []).forEach(med => {
         if (!med.drug) return;
-        if (med.end && med.end < td) return; // skip ended prescriptions
+        if (med.end && med.end < td) return;
         const done = (p.medAdminLogs || []).some(l => l.date === td && l.drug === med.drug && l.status === "Given");
         if (!done) {
           const stableId = `med-${p.id}-${med.drug}-${td}`;
@@ -777,12 +852,29 @@ function useNotifications(patients) {
         }
       });
     });
-    setNotifs(n.slice(0, 25));
-  }, [patients]);
+
+    // Add patient alerts (doctor notes, new drugs) for my ward patients
+    patientAlerts.forEach(a => {
+      if (wardFilter && a.ward && a.ward !== wardFilter) return; // skip other wards
+      const stableId = a.id;
+      n.push({
+        id: stableId,
+        patientId: a.patientId,
+        patientName: a.patientName,
+        ward: a.ward,
+        level: a.type === "new_drug" ? "warning" : "info",
+        msg: a.message,
+        time: a.createdAt?.toDate?.()?.toISOString() || new Date().toISOString(),
+        read: readSet.current.has(stableId),
+        alertType: a.type,
+      });
+    });
+
+    setNotifs(n.slice(0, 50));
+  }, [patients, patientAlerts, wardFilter]);
 
   const unread = notifs.filter(n => !n.read).length;
   const markRead = () => {
-    // Persist which IDs have been read so they survive re-renders
     notifs.forEach(n => readSet.current.add(n.id));
     setNotifs(ns => ns.map(x => ({ ...x, read: true })));
   };
@@ -790,6 +882,7 @@ function useNotifications(patients) {
 }
 
 function NotifPanel({ open, notifs, unread, onMarkRead, onClose, onSelectPatient }) {
+  const alertIcon = (n) => n.alertType === "doctor_note" ? "📝" : n.alertType === "new_drug" ? "💊" : n.level === "critical" ? "🚨" : "⚠️";
   return (
     <div className={`notif-panel ${open ? "open" : ""}`}>
       <div style={{ padding: "13px 15px", borderBottom: "1px solid var(--border2)", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
@@ -807,7 +900,7 @@ function NotifPanel({ open, notifs, unread, onMarkRead, onClose, onSelectPatient
           : notifs.map(n => (
             <div key={n.id} className={`notif-item ${n.read ? "" : "unread"} ${n.level === "critical" ? "critical-item" : ""}`} onClick={() => { onSelectPatient(n.patientId); onClose(); }}>
               <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 3 }}>
-                <span className={`badge badge-${n.level}`}>{n.level}</span>
+                <span className={`badge badge-${n.level || "warning"}`}>{alertIcon(n)} {n.alertType === "doctor_note" ? "Doctor Note" : n.alertType === "new_drug" ? "New Prescription" : n.level}</span>
                 <span style={{ fontSize: 10, color: "var(--t3)" }}>{new Date(n.time).toLocaleTimeString()}</span>
               </div>
               <div style={{ fontWeight: 600, fontSize: 13 }}>{n.patientName}</div>
@@ -821,7 +914,7 @@ function NotifPanel({ open, notifs, unread, onMarkRead, onClose, onSelectPatient
 }
 
 // ─── GLOBAL SEARCH ────────────────────────────────────────────────────────────
-function GlobalSearch({ patients, onSelect }) {
+function GlobalSearch({ patients, onSelect, nurseWard }) {
   const [q, setQ] = useState("");
   const [open, setOpen] = useState(false);
   const ref = useRef();
@@ -830,25 +923,40 @@ function GlobalSearch({ patients, onSelect }) {
     document.addEventListener("mousedown", h);
     return () => document.removeEventListener("mousedown", h);
   }, []);
+
+  const isEmrSearch = q.length > 2 && /^[A-Za-z0-9\-]+$/.test(q.trim());
+
   const results = q.length > 1
-    ? patients.filter(p =>
-      p.name?.toLowerCase().includes(q.toLowerCase()) ||
-      p.emr?.toLowerCase().includes(q.toLowerCase()) ||
-      p.diagnosis?.toLowerCase().includes(q.toLowerCase()) ||
-      p.ward?.toLowerCase().includes(q.toLowerCase())
-    ).slice(0, 8) : [];
+    ? patients.filter(p => {
+        // Nurses: only show own ward patients, UNLESS searching by EMR
+        if (nurseWard) {
+          const emrMatch = p.emr?.toLowerCase() === q.trim().toLowerCase() || p.emr?.toLowerCase().includes(q.trim().toLowerCase());
+          if (emrMatch) return true; // allow cross-ward EMR search
+          return p.ward === nurseWard && (
+            p.name?.toLowerCase().includes(q.toLowerCase()) ||
+            p.diagnosis?.toLowerCase().includes(q.toLowerCase())
+          );
+        }
+        return (
+          p.name?.toLowerCase().includes(q.toLowerCase()) ||
+          p.emr?.toLowerCase().includes(q.toLowerCase()) ||
+          p.diagnosis?.toLowerCase().includes(q.toLowerCase()) ||
+          p.ward?.toLowerCase().includes(q.toLowerCase())
+        );
+      }).slice(0, 8) : [];
+
   return (
     <div ref={ref} className="tb-search">
       <span style={{ color: "var(--t3)", fontSize: 14, flexShrink: 0 }}>🔍</span>
-      <input placeholder="Search by name, EMR, diagnosis, ward…" value={q} onChange={e => { setQ(e.target.value); setOpen(true); }} onFocus={() => setOpen(true)} />
+      <input placeholder={nurseWard ? "Search ward patients or EMR# for cross-ward…" : "Search by name, EMR, diagnosis, ward…"} value={q} onChange={e => { setQ(e.target.value); setOpen(true); }} onFocus={() => setOpen(true)} />
       {q && <button onClick={() => { setQ(""); setOpen(false); }} style={{ background: "none", border: "none", color: "var(--t3)", cursor: "pointer", fontSize: 14 }}>✕</button>}
       {open && q.length > 1 && (
         <div className="search-dropdown">
           {results.length === 0
-            ? <div style={{ padding: "12px 14px", color: "var(--t3)", fontSize: 13 }}>No results for "{q}"</div>
+            ? <div style={{ padding: "12px 14px", color: "var(--t3)", fontSize: 13 }}>No results for "{q}"{nurseWard && " — try full EMR number for cross-ward search"}</div>
             : results.map(p => (
               <div key={p.id} className="search-result-item" onClick={() => { onSelect(p.id); setQ(""); setOpen(false); }}>
-                <div style={{ fontWeight: 700, fontSize: 13 }}>{p.name}</div>
+                <div style={{ fontWeight: 700, fontSize: 13 }}>{p.name} {p.ward !== nurseWard && nurseWard && <span style={{ fontSize: 10, color: "var(--warning)", marginLeft: 5 }}>📍 {p.ward?.split("–")[0]?.trim()}</span>}</div>
                 <div style={{ fontSize: 11, color: "var(--t2)", marginTop: 2 }}>EMR: {p.emr || "—"} &nbsp;•&nbsp; {p.ward || "—"} &nbsp;•&nbsp; {p.diagnosis || "No diagnosis"}</div>
               </div>
             ))}
@@ -1713,6 +1821,37 @@ function NursingTab({ patient }) {
   );
 }
 
+function DoctorReportTab({ patient }) {
+  const [notes, setNotes] = useState([]);
+  useEffect(() => {
+    if (!patient?.id) return;
+    const unsub = FB.onDoctorNotes(patient.id, setNotes);
+    return () => unsub();
+  }, [patient?.id]);
+
+  return (
+    <div className="info-card">
+      <h4>📝 Doctor's Report / Call Notes ({notes.length})</h4>
+      {notes.length === 0
+        ? <div className="empty-state" style={{ padding: 20 }}><div className="empty-icon">📝</div><div className="empty-text">No doctor notes yet</div><div style={{ fontSize: 12, color: "var(--t3)", marginTop: 4 }}>Doctor notes will appear here automatically</div></div>
+        : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {notes.map(n => (
+              <div key={n.id} style={{ background: "var(--bg3)", border: "1.5px solid var(--border2)", borderLeft: "4px solid var(--purple)", borderRadius: "var(--r-sm)", padding: "12px 14px" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6, flexWrap: "wrap", gap: 5 }}>
+                  <span style={{ fontWeight: 700, fontSize: 12, color: "var(--purple)" }}>🩺 Dr. {n.by}</span>
+                  <span style={{ fontSize: 11, color: "var(--t3)" }}>{n.createdAt?.toDate ? new Date(n.createdAt.toDate()).toLocaleString() : n.date || "—"}</span>
+                </div>
+                {n.category && <span style={{ fontSize: 10, background: "rgba(58,58,158,0.1)", color: "var(--purple)", padding: "2px 8px", borderRadius: 20, display: "inline-block", marginBottom: 6 }}>{n.category}</span>}
+                <p style={{ fontSize: 13, lineHeight: 1.65, whiteSpace: "pre-wrap", margin: 0 }}>{n.note}</p>
+              </div>
+            ))}
+          </div>
+        )}
+    </div>
+  );
+}
+
 function WoundTab({ patient }) {
   const rows = patient.woundRecords || [];
   return (
@@ -1811,8 +1950,8 @@ function PatientDetail({ patient, user, onUpdate, toast }) {
   const tabs = [
     ["visit", "📋 Visit"], ["vitals", "💓 Vitals"], ["prescription", "📝 Prescription"],
     ["medadmin", "💊 Med Admin"], ["orders", "📋 Orders"], ["glycemic", "🩸 Glycemic"],
-    ["fluid", "💧 Fluid"], ["nursing", "📝 Nursing"], ["wound", "🩹 Wounds"],
-    ["lab", "🧪 Labs"], ["transfusion", "🩸 Transfusion"],
+    ["fluid", "💧 Fluid"], ["nursing", "📝 Nursing"], ["doctorreport", "📝 Doctor's Report"],
+    ["wound", "🩹 Wounds"], ["lab", "🧪 Labs"], ["transfusion", "🩸 Transfusion"],
   ];
 
   const exportRecord = () => {
@@ -1897,6 +2036,7 @@ function PatientDetail({ patient, user, onUpdate, toast }) {
       {activeTab === "glycemic" && <GlycemicTab patient={patient} />}
       {activeTab === "fluid" && <FluidTab patient={patient} />}
       {activeTab === "nursing" && <NursingTab patient={patient} />}
+      {activeTab === "doctorreport" && <DoctorReportTab patient={patient} />}
       {activeTab === "wound" && <WoundTab patient={patient} />}
       {activeTab === "lab" && <LabTab patient={patient} />}
       {activeTab === "transfusion" && <TransfusionTab patient={patient} />}
@@ -2644,18 +2784,26 @@ function MainApp({ user, onLogout }) {
   const [selectedId, setSelectedId] = useState(null);
   const [filter, setFilter] = useState("active");
   const [section, setSection] = useState("patients");
-  const [overallNurse, setOverallNurse] = useState(null);       // { name, uid } | null
+  const [overallNurse, setOverallNurse] = useState(null);
   const [allUsers, setAllUsers] = useState([]);
   const [wardReports, setWardReports] = useState([]);
   const [archives, setArchives] = useState([]);
-  const [theme, setTheme] = useState("light"); // "light" | "dim" | "dark"
-  const cycleTheme = () => setTheme(t => t === "light" ? "dim" : t === "dim" ? "dark" : "light");
+  const [theme, setTheme] = useState(getStoredTheme);
+  const cycleTheme = () => setTheme(t => {
+    const next = t === "light" ? "dim" : t === "dim" ? "dark" : "light";
+    setStoredTheme(next);
+    return next;
+  });
   const [loading, setLoading] = useState(true);
   const [modals, setModals] = useState({});
   const [notifOpen, setNotifOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [toastState, showToast] = useToast();
-  const { notifs, unread, markRead } = useNotifications(patients);
+
+  // Ward restriction: nurses only see their own ward patients
+  const nurseWard = user.role === "nurse" ? (user.ward || null) : null;
+
+  const { notifs, unread, markRead } = useNotifications(patients, nurseWard);
   const openM = (m) => setModals(x => ({ ...x, [m]: true }));
   const closeM = (m) => setModals(x => ({ ...x, [m]: false }));
 
@@ -2668,14 +2816,16 @@ function MainApp({ user, onLogout }) {
     return () => { unsubPt(); unsubNurse(); unsubWR(); unsubAR(); };
   }, []);
 
-  const filtered = patients.filter(p => {
+  // Filter patients: nurses see only their ward; supervisors/wardmasters see all
+  const allFiltered = patients.filter(p => {
+    if (p.deleted) return false;
+    if (nurseWard && p.ward !== nurseWard) return false; // ward restriction
     if (filter === "active") return (p.status || "active") === "active";
     if (filter === "discharged") return p.status === "discharged";
     return true;
   });
   const selected = patients.find(p => p.id === selectedId) || null;
   const roleLabel = user.role === "wardmaster" ? "Ward Master" : user.role === "supervisor" ? "Supervisor" : "Ward Nurse";
-  // true when the currently logged-in user is the assigned overall nurse of the day
   const isOverallNurse = !!(overallNurse?.uid && overallNurse.uid === user.uid);
 
   const handleAddPatient = async (data) => {
@@ -2762,13 +2912,13 @@ function MainApp({ user, onLogout }) {
       <div className={`main ${sidebarOpen ? "sidebar-open" : ""}`}>
         <div className="topbar">
           <button className="hamburger" onClick={() => setSidebarOpen(o => !o)}>☰</button>
-          <div style={{ flexShrink: 0 }}>
+            <div style={{ flexShrink: 0 }}>
             <div className="tb-title">{section === "overview" ? "Ward Overview" : section === "reports" ? "Reports" : section === "wardreport" ? "Ward Report" : section === "collation" ? "24hr Collation" : section === "allwardsreport" ? "24hr Nurses Report" : "Patients"}</div>
             <div className="tb-sub">
-              {section === "patients" ? `${filtered.length} ${filter} patient${filtered.length !== 1 ? "s" : ""}` : section === "overview" ? `${patients.filter(p => (p.status || "active") === "active").length} active` : section === "wardreport" ? (user.ward || "No ward") : section === "collation" ? `${wardReports.filter(r => r.date === new Date().toISOString().split("T")[0]).length} reports today` : section === "allwardsreport" ? `${WARDS.length} wards · Overall Nurse view` : `${patients.length} total`}
+              {section === "patients" ? `${allFiltered.length} ${filter} patient${allFiltered.length !== 1 ? "s" : ""}${nurseWard ? ` · ${nurseWard.split("–")[0].trim()}` : ""}` : section === "overview" ? `${patients.filter(p => (p.status || "active") === "active").length} active` : section === "wardreport" ? (user.ward || "No ward") : section === "collation" ? `${wardReports.filter(r => r.date === new Date().toISOString().split("T")[0]).length} reports today` : section === "allwardsreport" ? `${WARDS.length} wards · Overall Nurse view` : `${patients.length} total`}
             </div>
           </div>
-          <GlobalSearch patients={patients} onSelect={handleSelectPatient} />
+          <GlobalSearch patients={patients} onSelect={handleSelectPatient} nurseWard={nurseWard} />
           <div className="tb-right">
             <span className="badge-live"><span className="badge-dot" />Live</span>
             <button className="btn btn-ghost btn-sm" style={{ position: "relative" }} onClick={() => { setNotifOpen(o => { if (o) markRead(); return !o; }); }}>
@@ -2799,9 +2949,9 @@ function MainApp({ user, onLogout }) {
               <div className="pt-list">
                 {loading
                   ? <div style={{ textAlign: "center", padding: 20, color: "var(--t3)" }}>Loading patients…</div>
-                  : filtered.length === 0
+                  : allFiltered.length === 0
                     ? <div style={{ textAlign: "center", padding: "26px 10px", color: "var(--t3)", fontSize: 12 }}><div style={{ fontSize: 22, marginBottom: 5, opacity: 0.3 }}>📋</div>{filter === "active" ? "No active patients." : "No patients found."}</div>
-                    : filtered.map(p => {
+                    : allFiltered.map(p => {
                       const hasCritical = checkVitalAlerts(p.vitals?.[0] || {}).some(a => a.level === "critical");
                       return (
                         <div key={p.id} className={`pt-card ${selectedId === p.id ? "active" : ""}`} onClick={() => setSelectedId(p.id)}>
@@ -5056,9 +5206,22 @@ const deptCss = `
 `;
 
 function DeptShell({icon,name,role,user,onLogout,navItems,section,setSection,children}){
+  const [theme, setTheme] = useState(getStoredTheme);
+  const cycleTheme = () => setTheme(t => {
+    const next = t === "light" ? "dim" : t === "dim" ? "dark" : "light";
+    setStoredTheme(next);
+    return next;
+  });
+  const themeClass = theme === "dim" ? " theme-dim" : theme === "dark" ? " theme-dark" : "";
+  const themeIcon = theme === "light" ? "🌙" : theme === "dim" ? "⬛" : "☀️";
+  const themeLabel = theme === "light" ? "Dim Mode" : theme === "dim" ? "Dark Mode" : "Light Mode";
+
+  // Apply theme CSS vars to dept-root via inline style override
+  const themeStyle = theme !== "light" ? {} : {};
+
   return (
-    <div className="dept-root">
-      <style>{deptCss}</style>
+    <div className={`dept-root app${themeClass}`} style={{fontFamily:"Times New Roman,Times,serif"}}>
+      <style>{css}{deptCss}</style>
       <nav className="dept-sidebar">
         <div className="dept-sb-logo"><div className="dept-sb-icon">{icon}</div><div className="dept-sb-name">{name}</div><div className="dept-sb-sub">MedRecord EMR</div></div>
         <div className="dept-sb-user">
@@ -5068,18 +5231,20 @@ function DeptShell({icon,name,role,user,onLogout,navItems,section,setSection,chi
         <div className="dept-sb-nav">
           <div className="dept-nav-section">Navigation</div>
           {navItems.map(n=><button key={n.id} className={"dept-nav-btn "+(section===n.id?"active":"")} onClick={()=>setSection(n.id)}><span className="dni">{n.icon}</span>{n.label}</button>)}
+          <div className="dept-nav-section">Settings</div>
+          <button className="dept-nav-btn" onClick={cycleTheme}><span className="dni">{themeIcon}</span>{themeLabel}</button>
           <div className="dept-nav-section">Session</div>
           <button className="dept-nav-btn" onClick={onLogout} style={{color:"rgba(255,120,120,.8)"}}><span className="dni">🚪</span>Logout</button>
         </div>
         <div className="dept-sb-footer">{new Date().toLocaleDateString("en-GB",{day:"2-digit",month:"short",year:"numeric"})}</div>
       </nav>
-      <div className="dept-main">
-        <div className="dept-topbar">
-          <div className="dept-tb-title">{navItems.find(n=>n.id===section)?.label||name}</div>
+      <div className="dept-main" style={{background:"var(--bg)",color:"var(--t1)"}}>
+        <div className="dept-topbar" style={{background:"var(--topbar)",borderColor:"var(--topbar-bdr)"}}>
+          <div className="dept-tb-title" style={{color:"var(--t1)"}}>{navItems.find(n=>n.id===section)?.label||name}</div>
           <div className="dept-tb-badge"><div className="dept-tb-dot"/>Online</div>
-          <span style={{fontSize:11,color:"#4a6699",fontWeight:700}}>{user?.email}</span>
+          <span style={{fontSize:11,color:"var(--t2)",fontWeight:700}}>{user?.email}</span>
         </div>
-        <div className="dept-content">{children}</div>
+        <div className="dept-content" style={{background:"var(--bg)"}}>{children}</div>
       </div>
     </div>
   );
@@ -5127,13 +5292,40 @@ function PhysicianDashboard({user,onLogout}){
   const showToast=(m,t)=>showToastRaw(m,t);
   useEffect(()=>{const unsub=FB.onPatients(pts=>setPatients(pts.filter(p=>!p.deleted)));return()=>unsub();},[]);
   const selected=patients.find(p=>p.id===selectedId)||null;
-  const saveEntry=async(field,entry)=>{if(!selected)return;const u={...selected,[field]:[{...entry,id:uid(),by:user.name,at:new Date().toISOString()},...(selected[field]||[])]};await FB.savePatient(u);setPatients(ps=>ps.map(p=>p.id===u.id?u:p));showToast("Saved.");};
+
+  const saveEntry=async(field,entry)=>{
+    if(!selected)return;
+    const u={...selected,[field]:[{...entry,id:uid(),by:user.name,at:new Date().toISOString()},...(selected[field]||[])]};
+    await FB.savePatient(u);setPatients(ps=>ps.map(p=>p.id===u.id?u:p));showToast("Saved.");
+  };
+
+  // Save prescriptions with alert notification to nurses
+  const savePrescriptions=async(prescriptions)=>{
+    if(!selected)return;
+    const prevCount=(selected.prescriptions||[]).length;
+    const newCount=prescriptions.length;
+    const u={...selected,prescriptions,prescriptionsUpdatedAt:new Date().toISOString(),prescriptionsUpdatedBy:user.name};
+    await FB.savePatient(u);
+    setPatients(ps=>ps.map(p=>p.id===u.id?u:p));
+    // Fire alert if new drugs were added
+    if(newCount>prevCount){
+      const newDrugs=prescriptions.slice(0,newCount-prevCount).map(m=>m.drug).join(", ");
+      await FB.savePatientAlert({
+        patientId:selected.id, patientName:selected.name, ward:selected.ward,
+        type:"new_drug", message:`💊 New drug(s) prescribed: ${newDrugs} — Dr. ${user.name}`,
+        by:user.name,
+      });
+    }
+    showToast("Prescription saved & nurses notified.");
+  };
+
   const navItems=[
     {id:"history",icon:"📋",label:"Patient History"},
     {id:"examination",icon:"🩺",label:"Physical Examination"},
     {id:"diagnosis",icon:"🔬",label:"Diagnosis Entry"},
     {id:"investigations",icon:"🧪",label:"Order Investigations"},
     {id:"prescribe",icon:"💊",label:"Prescribe Drugs"},
+    {id:"callnotes",icon:"📝",label:"Call Notes / Reports"},
     {id:"referral",icon:"↗️",label:"Referral to Departments"},
     {id:"admission",icon:"🏥",label:"Admission / Discharge"},
   ];
@@ -5197,7 +5389,8 @@ function PhysicianDashboard({user,onLogout}){
       {section==="examination"&&<div className="dept-card"><h4>🩺 Physical Examination</h4>{!selected?<EmptyState icon="🩺" title="Select a patient"/>:<PhysExamForm onSave={data=>saveEntry("physicalExams",data)} showToast={showToast}/>}</div>}
       {section==="diagnosis"&&<div className="dept-card"><h4>🔬 Diagnosis Entry</h4>{!selected?<EmptyState icon="🔬" title="Select a patient"/>:<DiagnosisForm patient={selected} onSave={async diag=>{const u={...selected,diagnosis:diag.primary,diagnosisHistory:[{...diag,id:uid(),by:user.name,at:new Date().toISOString()},...(selected.diagnosisHistory||[])]};await FB.savePatient(u);setPatients(ps=>ps.map(p=>p.id===u.id?u:p));showToast("Diagnosis saved.");}} showToast={showToast}/>}</div>}
       {section==="investigations"&&<div className="dept-card"><h4>🧪 Order Investigations</h4>{!selected?<EmptyState icon="🧪" title="Select a patient"/>:<InvOrderForm physician={user.name} onSave={async orders=>{const u={...selected,investigationOrders:[...orders,...(selected.investigationOrders||[])]};await FB.savePatient(u);setPatients(ps=>ps.map(p=>p.id===u.id?u:p));showToast("Orders placed.");}} showToast={showToast}/>}</div>}
-      {section==="prescribe"&&<div className="dept-card"><h4>💊 Prescribe Drugs</h4>{!selected?<EmptyState icon="💊" title="Select a patient"/>:<PrescribeForm patient={selected} physician={user.name} onSave={async meds=>{const u={...selected,prescriptions:meds};await FB.savePatient(u);setPatients(ps=>ps.map(p=>p.id===u.id?u:p));showToast("Prescription saved.");}} showToast={showToast}/>}</div>}
+      {section==="prescribe"&&<div className="dept-card"><h4>💊 Prescribe Drugs</h4>{!selected?<EmptyState icon="💊" title="Select a patient"/>:<PrescribeForm patient={selected} physician={user.name} onSave={savePrescriptions} showToast={showToast}/>}</div>}
+      {section==="callnotes"&&<div className="dept-card"><h4>📝 Call Notes / Patient Reports</h4>{!selected?<EmptyState icon="📝" title="Select a patient"/>:<DoctorCallNoteForm patient={selected} physician={user.name} onSave={async(noteData)=>{await FB.saveDoctorNote(selected.id,{...noteData,patientId:selected.id,patientName:selected.name,ward:selected.ward,by:user.name});await FB.savePatientAlert({patientId:selected.id,patientName:selected.name,ward:selected.ward,type:"doctor_note",message:`📝 Dr. ${user.name} wrote a new call note for ${selected.name}`,by:user.name,});showToast("Note saved — nurses have been notified.");}} showToast={showToast}/>}</div>}
       {section==="referral"&&<div className="dept-card"><h4>↗️ Referral to Departments</h4>{!selected?<EmptyState icon="↗️" title="Select a patient"/>:<DeptReferralForm physician={user.name} onSave={async ref=>{const u={...selected,referrals:[{...ref,id:uid(),by:user.name,at:new Date().toISOString()},...(selected.referrals||[])]};await FB.savePatient(u);setPatients(ps=>ps.map(p=>p.id===u.id?u:p));showToast("Referral sent.");}} showToast={showToast}/>}</div>}
       {section==="admission"&&<div className="dept-card"><h4>🏥 Admission / Discharge</h4>{!selected?<EmptyState icon="🏥" title="Select a patient"/>:<AdmDischargeForm patient={selected} physician={user.name} onSave={async(action,notes)=>{const u={...selected,status:action==="discharge"?"discharged":"active",awaitingPhysician:false,statusHistory:[{action,notes,id:uid(),by:user.name,at:new Date().toISOString()},...(selected.statusHistory||[])]};await FB.savePatient(u);setPatients(ps=>ps.map(p=>p.id===u.id?u:p));showToast("Status updated.");}} showToast={showToast}/>}</div>}
     </DeptShell>
@@ -5214,6 +5407,55 @@ function PhysExamForm({onSave,showToast}){
       <div className="form-group"><label className="form-label">Examination Findings *</label><textarea className="form-textarea" style={{minHeight:100}} value={d.findings} onChange={e=>set("findings",e.target.value)} placeholder="Document examination findings in detail…"/></div>
       <div className="form-group"><label className="form-label">Clinical Impression</label><textarea className="form-textarea" style={{minHeight:60}} value={d.impression} onChange={e=>set("impression",e.target.value)}/></div>
       <button className="dept-send-btn" onClick={()=>{if(!d.findings.trim()){showToast("Findings required.","error");return;}onSave(d);setD({date:today(),systems:"",findings:"",impression:""});}}>💾 Save Examination</button>
+    </div>
+  );
+}
+
+function DoctorCallNoteForm({patient,physician,onSave,showToast}){
+  const [notes,setNotes]=useState([]);
+  const [note,setNote]=useState("");
+  const [category,setCategory]=useState("General");
+  const [saving,setSaving]=useState(false);
+  const CATEGORIES=["General","Ward Round Note","Call Note","Consultation","Medication Review","Discharge Planning","Emergency Note"];
+  useEffect(()=>{
+    if(!patient?.id) return;
+    const unsub=FB.onDoctorNotes(patient.id,setNotes);
+    return ()=>unsub();
+  },[patient?.id]);
+  const handleSave=async()=>{
+    if(!note.trim()){showToast("Note cannot be empty.","error");return;}
+    setSaving(true);
+    try{
+      await onSave({note:note.trim(),category,date:today(),time:new Date().toLocaleTimeString()});
+      setNote("");showToast("Note saved — nurses notified.");
+    }catch(e){showToast("Error: "+e.message,"error");}
+    setSaving(false);
+  };
+  return (
+    <div>
+      <div style={{background:"rgba(58,58,158,0.06)",border:"1px solid rgba(58,58,158,0.18)",borderRadius:10,padding:14,marginBottom:14}}>
+        <div style={{fontWeight:700,fontSize:12,color:"var(--purple,#3a3a9e)",marginBottom:10}}>📝 Write Call Note / Patient Report</div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:10}}>
+          <div className="form-group" style={{marginBottom:0}}><label className="form-label">Category</label><select className="form-select" value={category} onChange={e=>setCategory(e.target.value)}>{CATEGORIES.map(c=><option key={c}>{c}</option>)}</select></div>
+          <div className="form-group" style={{marginBottom:0}}><label className="form-label">Date / Time</label><input className="form-input" type="text" value={today()+" "+new Date().toLocaleTimeString()} readOnly style={{opacity:.7}}/></div>
+        </div>
+        <div className="form-group" style={{marginBottom:10}}><label className="form-label">Note *</label><textarea className="form-textarea" style={{minHeight:140}} value={note} onChange={e=>setNote(e.target.value)} placeholder={`Write your ${category.toLowerCase()} for ${patient?.name}…\n\nInclude clinical observations, treatment decisions, medication adjustments, response to treatment, etc.`}/></div>
+        <button className="dept-send-btn" onClick={handleSave} disabled={saving||!note.trim()}>{saving?<><span className="ai-spinner"/>Saving…</>:"📝 Save Note & Notify Nurses"}</button>
+      </div>
+      {notes.length>0&&(
+        <div>
+          <div style={{fontWeight:700,fontSize:12,marginBottom:10}}>Previous Notes ({notes.length})</div>
+          {notes.map(n=>(
+            <div key={n.id} style={{background:"#f8fafc",border:"1px solid #dce6f5",borderLeft:"4px solid #3a3a9e",borderRadius:"var(--r-sm)",padding:"10px 14px",marginBottom:9}}>
+              <div style={{display:"flex",justifyContent:"space-between",marginBottom:5,flexWrap:"wrap",gap:5}}>
+                <span style={{fontSize:10,background:"rgba(58,58,158,.1)",color:"#3a3a9e",padding:"2px 8px",borderRadius:20,fontWeight:700}}>{n.category||"General"}</span>
+                <span style={{fontSize:11,color:"#4a6a8a"}}>{n.createdAt?.toDate?new Date(n.createdAt.toDate()).toLocaleString():n.date+" "+n.time}</span>
+              </div>
+              <div style={{fontSize:12,lineHeight:1.65,whiteSpace:"pre-wrap"}}>{n.note}</div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -6787,19 +7029,24 @@ export default function App() {
   const [checking, setChecking] = useState(true);
 
   useEffect(() => {
+    // Max 2-second loading time
+    const timeout = setTimeout(() => setChecking(false), 2000);
     const unsub = FB.onAuth(async (fbUser) => {
       if (fbUser) {
-        const p = await FB.getProfile(fbUser.uid);
-        if (p && !p.deleted && !p.suspended) {
-          setUser({ uid:fbUser.uid, email:fbUser.email, ...p });
-        } else {
-          await FB.logout();
-          setUser(null);
-        }
+        try {
+          const p = await FB.getProfile(fbUser.uid);
+          if (p && !p.deleted && !p.suspended) {
+            setUser({ uid:fbUser.uid, email:fbUser.email, ...p });
+          } else {
+            await FB.logout();
+            setUser(null);
+          }
+        } catch(e) { setUser(null); }
       } else { setUser(null); }
+      clearTimeout(timeout);
       setChecking(false);
     });
-    return () => unsub();
+    return () => { unsub(); clearTimeout(timeout); };
   }, []);
 
   if (checking) return (
