@@ -29,11 +29,11 @@ const FB = {
   getProfile: async (uid) => { const s = await getDoc(doc(db, "users", uid)); return s.exists() ? s.data() : null; },
   getUsers: async () => { const s = await getDocs(collection(db, "users")); return s.docs.map(d => d.data()); },
   savePatient: async (p) => { await setDoc(doc(db, "patients", p.id), { ...p, updatedAt: serverTimestamp() }); },
+  // ward param: nurses get server-side ward filter. All roles get deleted exclusion + limit.
   onPatients: (cb, ward) => {
-    // For nurses: server-side filter by ward. Always exclude deleted docs.
     const constraints = ward
       ? [where("ward", "==", ward), where("deleted", "!=", true), orderBy("deleted"), orderBy("createdAt", "desc"), limit(200)]
-      : [where("deleted", "!=", true), orderBy("deleted"), orderBy("createdAt", "desc"), limit(500)];
+      : [where("deleted", "!=", true), orderBy("deleted"), orderBy("createdAt", "desc"), limit(300)];
     const q = query(collection(db, "patients"), ...constraints);
     return onSnapshot(q, { includeMetadataChanges: false }, s => cb(s.docs.map(d => d.data())));
   },
@@ -825,15 +825,13 @@ function GlobalSearch({ patients, onSelect, user }) {
     ? patients.filter(p => {
         const qLow = q.toLowerCase();
         const emrMatch = p.emr?.toLowerCase().includes(qLow);
+        // Nurses: EMR number can cross wards; all other fields are ward-scoped
         if (isNurse) {
           if (emrMatch) return true;
           if (nurseWard && p.ward !== nurseWard) return false;
           return p.name?.toLowerCase().includes(qLow) || p.diagnosis?.toLowerCase().includes(qLow);
         }
-        return (
-          p.name?.toLowerCase().includes(qLow) || emrMatch ||
-          p.diagnosis?.toLowerCase().includes(qLow) || p.ward?.toLowerCase().includes(qLow)
-        );
+        return emrMatch || p.name?.toLowerCase().includes(qLow) || p.diagnosis?.toLowerCase().includes(qLow) || p.ward?.toLowerCase().includes(qLow);
       }).slice(0, 8) : [];
   return (
     <div ref={ref} className="tb-search">
@@ -842,7 +840,7 @@ function GlobalSearch({ patients, onSelect, user }) {
       {q && <button onClick={() => { setQ(""); setOpen(false); }} style={{ background: "none", border: "none", color: "var(--t3)", cursor: "pointer", fontSize: 14 }}>✕</button>}
       {open && q.length > 1 && (
         <div className="search-dropdown">
-          {isNurse && <div style={{ padding: "5px 14px", fontSize: 11, color: "var(--t3)", borderBottom: "1px solid var(--border)", background: "var(--bg2)" }}>🔒 Your ward only · Use EMR number to find patients in other wards</div>}
+          {isNurse && <div style={{ padding: "5px 14px", fontSize: 11, color: "var(--t3)", borderBottom: "1px solid var(--border)", background: "var(--bg2)" }}>🔒 Your ward only · Search by EMR number to find patients in other wards</div>}
           {results.length === 0
             ? <div style={{ padding: "12px 14px", color: "var(--t3)", fontSize: 13 }}>No results for "{q}"</div>
             : results.map(p => (
@@ -2659,23 +2657,20 @@ function MainApp({ user, onLogout }) {
   const closeM = (m) => setModals(x => ({ ...x, [m]: false }));
 
   useEffect(() => {
-    // Nurses: fetch only their ward server-side (fast). Others: fetch all.
+    // Nurses get server-side ward filter — only their ward's patients are downloaded
     const nurseWard = user.role === "nurse" ? (user.ward || null) : null;
     const unsubPt = FB.onPatients(pts => { setPatients(pts); setLoading(false); }, nurseWard);
     const unsubNurse = FB.onSettings("overallNurse", d => setOverallNurse(d?.name ? { name: d.name, uid: d.uid || null } : null));
-    // Stagger secondary listeners so patient data loads first
-    const t = setTimeout(() => {
-      FB.getUsers().then(setAllUsers).catch(() => {});
-    }, 500);
+    // Stagger non-critical listeners so patient list renders first
+    const t1 = setTimeout(() => FB.getUsers().then(setAllUsers).catch(() => {}), 800);
     const unsubWR = FB.onWardReports(setWardReports);
     const unsubAR = FB.on24hrArchives(setArchives);
-    return () => { unsubPt(); unsubNurse(); unsubWR(); unsubAR(); clearTimeout(t); };
+    return () => { unsubPt(); unsubNurse(); unsubWR(); unsubAR(); clearTimeout(t1); };
   }, []);
 
   const isNurse = user.role === "nurse";
   const filtered = patients.filter(p => {
     if (p.deleted) return false;
-    // Nurses: server query already scopes by ward, but guard client-side too
     if (isNurse && user.ward && p.ward !== user.ward) return false;
     if (filter === "active") return (p.status || "active") === "active";
     if (filter === "discharged") return p.status === "discharged";
