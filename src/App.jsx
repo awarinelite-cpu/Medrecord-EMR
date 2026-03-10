@@ -4,14 +4,23 @@ import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, si
 import { getFirestore, doc, setDoc, getDoc, collection, onSnapshot, serverTimestamp, query, orderBy, getDocs, addDoc, updateDoc } from "firebase/firestore";
 
 const firebaseConfig = {
-  apiKey: "AIzaSyD91f4UJKPXZEpfXV_QoggsZq1R_9WcC4s",
-  authDomain: "the-elites-nurses.firebaseapp.com",
-  projectId: "the-elites-nurses",
-  storageBucket: "the-elites-nurses.firebasestorage.app",
-  messagingSenderId: "44425476386",
-  appId: "1:44425476386:web:98be1e3e6a34c403eccd7b",
-  measurementId: "G-T4BELKJMZR"
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
+  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
+  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
+  appId: import.meta.env.VITE_FIREBASE_APP_ID,
+  measurementId: import.meta.env.VITE_FIREBASE_MEASUREMENT_ID,
 };
+```
+
+---
+
+## Step 3 — Add `.env` to `.gitignore`
+
+Open your `.gitignore` file (also in project root) and add this line:
+```
+.env
 const firebaseApp = initializeApp(firebaseConfig);
 const auth = getAuth(firebaseApp);
 const db = getFirestore(firebaseApp);
