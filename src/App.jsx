@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { initializeApp } from "firebase/app";
 import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, onAuthStateChanged, sendPasswordResetEmail } from "firebase/auth";
-import { getFirestore, doc, setDoc, getDoc, collection, onSnapshot, serverTimestamp, query, orderBy, where, limit, getDocs, addDoc, updateDoc } from "firebase/firestore";
+import { getFirestore, doc, setDoc, getDoc, collection, onSnapshot, serverTimestamp, query, orderBy, getDocs, addDoc, updateDoc } from "firebase/firestore";
 
 const firebaseConfig = {
   apiKey: "AIzaSyD91f4UJKPXZEpfXV_QoggsZq1R_9WcC4s",
@@ -29,14 +29,7 @@ const FB = {
   getProfile: async (uid) => { const s = await getDoc(doc(db, "users", uid)); return s.exists() ? s.data() : null; },
   getUsers: async () => { const s = await getDocs(collection(db, "users")); return s.docs.map(d => d.data()); },
   savePatient: async (p) => { await setDoc(doc(db, "patients", p.id), { ...p, updatedAt: serverTimestamp() }); },
-  // ward param: nurses get server-side ward filter. All roles get deleted exclusion + limit.
-  onPatients: (cb, ward) => {
-    const constraints = ward
-      ? [where("ward", "==", ward), where("deleted", "!=", true), orderBy("deleted"), orderBy("createdAt", "desc"), limit(200)]
-      : [where("deleted", "!=", true), orderBy("deleted"), orderBy("createdAt", "desc"), limit(300)];
-    const q = query(collection(db, "patients"), ...constraints);
-    return onSnapshot(q, { includeMetadataChanges: false }, s => cb(s.docs.map(d => d.data())));
-  },
+  onPatients: (cb) => { const q = query(collection(db, "patients"), orderBy("createdAt", "desc")); return onSnapshot(q, s => cb(s.docs.map(d => d.data()))); },
   saveSettings: async (key, data) => { await setDoc(doc(db, "settings", key), { ...data, updatedAt: serverTimestamp() }); },
   onSettings: (key, cb) => onSnapshot(doc(db, "settings", key), s => cb(s.exists() ? s.data() : null)),
   // 24hr ward reports
@@ -46,8 +39,8 @@ const FB = {
     return id;
   },
   onWardReports: (cb) => {
-    const q = query(collection(db, "wardReports"), orderBy("date", "desc"), limit(200));
-    return onSnapshot(q, { includeMetadataChanges: false }, s => cb(s.docs.map(d => d.data())));
+    const q = query(collection(db, "wardReports"), orderBy("date", "desc"));
+    return onSnapshot(q, s => cb(s.docs.map(d => d.data())));
   },
   save24hrArchive: async (data) => {
     const id = data.id || ("AR-" + Math.random().toString(36).slice(2,10));
@@ -55,8 +48,8 @@ const FB = {
     return id;
   },
   on24hrArchives: (cb) => {
-    const q = query(collection(db, "shiftArchives"), orderBy("archivedAt", "desc"), limit(50));
-    return onSnapshot(q, { includeMetadataChanges: false }, s => cb(s.docs.map(d => d.data())));
+    const q = query(collection(db, "shiftArchives"), orderBy("archivedAt", "desc"));
+    return onSnapshot(q, s => cb(s.docs.map(d => d.data())));
   },
   updateUserRole: async (uid, role) => { await updateDoc(doc(db, "users", uid), { role }); },
   deactivateUser: async (uid) => { await setDoc(doc(db, "users", uid), { deleted: true, deletedAt: serverTimestamp() }, { merge: true }); },
@@ -95,6 +88,7 @@ const ROLES = [
   { value:"dental", label:"Dental Officer" },
   { value:"publichealth", label:"Public Health Officer" },
   { value:"dot", label:"DOT / TB Officer" },
+  { value:"hird", label:"Health Information Records" },
 ];
 const SHIFTS = ["Morning (07:00–15:00)","Afternoon (15:00–23:00)","Night (23:00–07:00)"];
 const PAIN_SCALE = [0,1,2,3,4,5,6,7,8,9,10];
@@ -112,8 +106,9 @@ function checkVitalAlerts(v) {
   if (v.spo2 && +v.spo2 < 94) a.push({ level:"critical", msg:`SpO₂ critically low: ${v.spo2}%` });
   if (v.hr && (+v.hr > 120 || +v.hr < 50)) a.push({ level:"warning", msg:`Heart rate abnormal: ${v.hr} bpm` });
   if (v.temp && (+v.temp > 38.5 || +v.temp < 35.5)) a.push({ level:"warning", msg:`Temperature abnormal: ${v.temp}°C` });
-  const [sys] = (v.bp||"").split("/");
+  const [sys, dia] = (v.bp||"").split("/");
   if (sys && (+sys > 180 || +sys < 80)) a.push({ level:"critical", msg:`Blood pressure abnormal: ${v.bp} mmHg` });
+  else if (dia && (+dia > 110 || +dia < 50)) a.push({ level:"critical", msg:`Diastolic BP abnormal: ${v.bp} mmHg` });
   if (v.rr && (+v.rr > 25 || +v.rr < 10)) a.push({ level:"warning", msg:`Respiratory rate abnormal: ${v.rr}/min` });
   return a;
 }
@@ -758,23 +753,39 @@ function useToast() {
 // ─── NOTIFICATIONS ────────────────────────────────────────────────────────────
 function useNotifications(patients) {
   const [notifs, setNotifs] = useState([]);
-  const prevLen = useRef(0);
+  // Use a stable key map so read-state survives Firestore re-renders
+  const readSet = useRef(new Set());
+
   useEffect(() => {
     const n = [];
-    patients.forEach(p => {
+    const td = today();
+    // Only active patients generate notifications
+    patients.filter(p => (p.status || "active") === "active").forEach(p => {
       const v = p.vitals?.[0];
-      if (v) checkVitalAlerts(v).forEach(a => n.push({ id: uid(), patientId: p.id, patientName: p.name, ward: p.ward, ...a, time: v.recordedAt || new Date().toISOString(), read: false }));
-      const td = today();
+      if (v) checkVitalAlerts(v).forEach(a => {
+        const stableId = `vital-${p.id}-${a.msg}`;
+        n.push({ id: stableId, patientId: p.id, patientName: p.name, ward: p.ward, ...a, time: v.recordedAt || new Date().toISOString(), read: readSet.current.has(stableId) });
+      });
+      // Only prescriptions that haven't ended and have no same-day admin log
       (p.prescriptions || []).forEach(med => {
+        if (!med.drug) return;
+        if (med.end && med.end < td) return; // skip ended prescriptions
         const done = (p.medAdminLogs || []).some(l => l.date === td && l.drug === med.drug && l.status === "Given");
-        if (!done && med.drug) n.push({ id: uid(), patientId: p.id, patientName: p.name, ward: p.ward, level: "warning", msg: `Medication due: ${med.drug} ${med.dosage || ""}`, time: new Date().toISOString(), read: false });
+        if (!done) {
+          const stableId = `med-${p.id}-${med.drug}-${td}`;
+          n.push({ id: stableId, patientId: p.id, patientName: p.name, ward: p.ward, level: "warning", msg: `Medication due: ${med.drug} ${med.dosage || ""}`, time: new Date().toISOString(), read: readSet.current.has(stableId) });
+        }
       });
     });
     setNotifs(n.slice(0, 25));
-    prevLen.current = n.length;
   }, [patients]);
+
   const unread = notifs.filter(n => !n.read).length;
-  const markRead = () => setNotifs(n => n.map(x => ({ ...x, read: true })));
+  const markRead = () => {
+    // Persist which IDs have been read so they survive re-renders
+    notifs.forEach(n => readSet.current.add(n.id));
+    setNotifs(ns => ns.map(x => ({ ...x, read: true })));
+  };
   return { notifs, unread, markRead };
 }
 
@@ -787,7 +798,7 @@ function NotifPanel({ open, notifs, unread, onMarkRead, onClose, onSelectPatient
         </div>
         <div style={{ display: "flex", gap: 7 }}>
           {unread > 0 && <button className="btn btn-ghost btn-sm" onClick={onMarkRead}>Mark all read</button>}
-          <button className="modal-close" onClick={onClose}>✕</button>
+          <button className="modal-close" onClick={() => { onMarkRead(); onClose(); }}>✕</button>
         </div>
       </div>
       <div style={{ flex: 1, overflowY: "auto" }}>
@@ -810,7 +821,7 @@ function NotifPanel({ open, notifs, unread, onMarkRead, onClose, onSelectPatient
 }
 
 // ─── GLOBAL SEARCH ────────────────────────────────────────────────────────────
-function GlobalSearch({ patients, onSelect, user }) {
+function GlobalSearch({ patients, onSelect }) {
   const [q, setQ] = useState("");
   const [open, setOpen] = useState(false);
   const ref = useRef();
@@ -819,28 +830,20 @@ function GlobalSearch({ patients, onSelect, user }) {
     document.addEventListener("mousedown", h);
     return () => document.removeEventListener("mousedown", h);
   }, []);
-  const isNurse = user?.role === "nurse";
-  const nurseWard = user?.ward || "";
   const results = q.length > 1
-    ? patients.filter(p => {
-        const qLow = q.toLowerCase();
-        const emrMatch = p.emr?.toLowerCase().includes(qLow);
-        // Nurses: EMR number can cross wards; all other fields are ward-scoped
-        if (isNurse) {
-          if (emrMatch) return true;
-          if (nurseWard && p.ward !== nurseWard) return false;
-          return p.name?.toLowerCase().includes(qLow) || p.diagnosis?.toLowerCase().includes(qLow);
-        }
-        return emrMatch || p.name?.toLowerCase().includes(qLow) || p.diagnosis?.toLowerCase().includes(qLow) || p.ward?.toLowerCase().includes(qLow);
-      }).slice(0, 8) : [];
+    ? patients.filter(p =>
+      p.name?.toLowerCase().includes(q.toLowerCase()) ||
+      p.emr?.toLowerCase().includes(q.toLowerCase()) ||
+      p.diagnosis?.toLowerCase().includes(q.toLowerCase()) ||
+      p.ward?.toLowerCase().includes(q.toLowerCase())
+    ).slice(0, 8) : [];
   return (
     <div ref={ref} className="tb-search">
       <span style={{ color: "var(--t3)", fontSize: 14, flexShrink: 0 }}>🔍</span>
-      <input placeholder={isNurse ? "Search EMR to find any patient…" : "Search by name, EMR, diagnosis, ward…"} value={q} onChange={e => { setQ(e.target.value); setOpen(true); }} onFocus={() => setOpen(true)} />
+      <input placeholder="Search by name, EMR, diagnosis, ward…" value={q} onChange={e => { setQ(e.target.value); setOpen(true); }} onFocus={() => setOpen(true)} />
       {q && <button onClick={() => { setQ(""); setOpen(false); }} style={{ background: "none", border: "none", color: "var(--t3)", cursor: "pointer", fontSize: 14 }}>✕</button>}
       {open && q.length > 1 && (
         <div className="search-dropdown">
-          {isNurse && <div style={{ padding: "5px 14px", fontSize: 11, color: "var(--t3)", borderBottom: "1px solid var(--border)", background: "var(--bg2)" }}>🔒 Your ward only · Search by EMR number to find patients in other wards</div>}
           {results.length === 0
             ? <div style={{ padding: "12px 14px", color: "var(--t3)", fontSize: 13 }}>No results for "{q}"</div>
             : results.map(p => (
@@ -2657,21 +2660,15 @@ function MainApp({ user, onLogout }) {
   const closeM = (m) => setModals(x => ({ ...x, [m]: false }));
 
   useEffect(() => {
-    // Nurses get server-side ward filter — only their ward's patients are downloaded
-    const nurseWard = user.role === "nurse" ? (user.ward || null) : null;
-    const unsubPt = FB.onPatients(pts => { setPatients(pts); setLoading(false); }, nurseWard);
+    const unsubPt = FB.onPatients(pts => { setPatients(pts); setLoading(false); });
     const unsubNurse = FB.onSettings("overallNurse", d => setOverallNurse(d?.name ? { name: d.name, uid: d.uid || null } : null));
-    // Stagger non-critical listeners so patient list renders first
-    const t1 = setTimeout(() => FB.getUsers().then(setAllUsers).catch(() => {}), 800);
     const unsubWR = FB.onWardReports(setWardReports);
     const unsubAR = FB.on24hrArchives(setArchives);
-    return () => { unsubPt(); unsubNurse(); unsubWR(); unsubAR(); clearTimeout(t1); };
+    FB.getUsers().then(setAllUsers).catch(() => {});
+    return () => { unsubPt(); unsubNurse(); unsubWR(); unsubAR(); };
   }, []);
 
-  const isNurse = user.role === "nurse";
   const filtered = patients.filter(p => {
-    if (p.deleted) return false;
-    if (isNurse && user.ward && p.ward !== user.ward) return false;
     if (filter === "active") return (p.status || "active") === "active";
     if (filter === "discharged") return p.status === "discharged";
     return true;
@@ -2771,10 +2768,10 @@ function MainApp({ user, onLogout }) {
               {section === "patients" ? `${filtered.length} ${filter} patient${filtered.length !== 1 ? "s" : ""}` : section === "overview" ? `${patients.filter(p => (p.status || "active") === "active").length} active` : section === "wardreport" ? (user.ward || "No ward") : section === "collation" ? `${wardReports.filter(r => r.date === new Date().toISOString().split("T")[0]).length} reports today` : section === "allwardsreport" ? `${WARDS.length} wards · Overall Nurse view` : `${patients.length} total`}
             </div>
           </div>
-          <GlobalSearch patients={patients} onSelect={handleSelectPatient} user={user} />
+          <GlobalSearch patients={patients} onSelect={handleSelectPatient} />
           <div className="tb-right">
             <span className="badge-live"><span className="badge-dot" />Live</span>
-            <button className="btn btn-ghost btn-sm" style={{ position: "relative" }} onClick={() => { setNotifOpen(o => !o); markRead(); }}>
+            <button className="btn btn-ghost btn-sm" style={{ position: "relative" }} onClick={() => { setNotifOpen(o => { if (o) markRead(); return !o; }); }}>
               🔔{unread > 0 && <span style={{ position: "absolute", top: -4, right: -4, background: "var(--danger)", color: "#fff", fontSize: 9, width: 16, height: 16, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700 }}>{unread}</span>}
             </button>
           </div>
@@ -2798,7 +2795,6 @@ function MainApp({ user, onLogout }) {
                     <button key={f} className={`filter-tab ${filter === f ? "active" : ""}`} onClick={() => setFilter(f)}>{l}</button>
                   ))}
                 </div>
-                <button className="btn btn-primary" style={{ width: "100%", justifyContent: "center", fontSize: 12, marginTop: 4 }} onClick={() => openM("addPatient")}>+ Add New Patient</button>
               </div>
               <div className="pt-list">
                 {loading
@@ -2825,12 +2821,11 @@ function MainApp({ user, onLogout }) {
             </div>
             {selected
               ? <><button onClick={() => setSelectedId(null)} className="mobile-back-btn">← Back to list</button><PatientDetail key={selected.id} patient={selected} user={user} onUpdate={handleUpdatePatient} toast={showToast} /></>
-              : <div className="pt-detail"><div className="empty-state"><div className="empty-icon">📋</div><div className="empty-text">No Patient Selected</div><div className="empty-sub">Select a patient from the list or add a new one.</div></div></div>}
+              : <div className="pt-detail"><div className="empty-state"><div className="empty-icon">📋</div><div className="empty-text">No Patient Selected</div><div className="empty-sub">Select a patient from the list to view their records.</div></div></div>}
           </>}
         </div>
       </div>
 
-      <AddPatientModal open={!!modals.addPatient} onClose={() => closeM("addPatient")} onSave={handleAddPatient} user={user} />
       <OverallNurseModal open={!!modals.overallNurse} onClose={() => closeM("overallNurse")} users={allUsers} overallNurse={overallNurse?.name || null}
         onAssign={async ({ name, uid }) => { await FB.saveSettings("overallNurse", { name, uid }); showToast(name + " assigned as Overall Nurse."); closeM("overallNurse"); }}
         onEnd={async () => { await FB.saveSettings("overallNurse", { name: null, uid: null }); showToast("Shift ended."); closeM("overallNurse"); }} />
@@ -3617,7 +3612,7 @@ function AdminUsers({ users, onRefresh, showToast }) {
                 <div className="adm-form-group"><label className="adm-label">Password *</label><input className="adm-input" type="password" placeholder="Min 6 characters" value={form.password} onChange={e=>setForm(f=>({...f,password:e.target.value}))} /></div>
                 <div className="adm-form-group"><label className="adm-label">Assign Role</label>
                   <select className="adm-select" value={form.role} onChange={e=>setForm(f=>({...f,role:e.target.value}))}>
-                    <option value="nurse">Ward Nurse</option><option value="supervisor">Supervisor</option><option value="wardmaster">Ward Master</option>
+                    <option value="nurse">Ward Nurse</option><option value="supervisor">Supervisor</option><option value="wardmaster">Ward Master</option><option value="physician">Physician / Doctor</option><option value="laboratory">Laboratory Scientist</option><option value="radiology">Radiologist</option><option value="pharmacy">Pharmacist</option><option value="physiotherapy">Physiotherapist</option><option value="dietitian">Dietitian</option><option value="ent">ENT Specialist</option><option value="dental">Dental Officer</option><option value="publichealth">Public Health Officer</option><option value="dot">DOT / TB Officer</option><option value="hird">Health Information Records</option>
                   </select>
                 </div>
               </div>
@@ -6202,8 +6197,589 @@ if(!AI.checkInteractions){AI.checkInteractions=async(prescriptions)=>{
 
 
 
-// ─── ROOT ─────────────────────────────────────────────────────────────────────
-export default function App() {
+// ─── HEALTH INFORMATION RECORDS DEPARTMENT (HIRD) ────────────────────────────
+function HIRDDashboard({ user, onLogout }) {
+  const [patients, setPatients] = useState([]);
+  const [section, setSection] = useState("register");
+  const [toastState, setToastState] = useState({ msg: "", type: "success" });
+  const [theme, setTheme] = useState("light");
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [selectedId, setSelectedId] = useState(null);
+  const [search, setSearch] = useState("");
+  const [filter, setFilter] = useState("active");
+  const [showForm, setShowForm] = useState(false);
+  const [editPatient, setEditPatient] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  const blank = { name:"", emr:"", dob:"", gender:"Male", ward:"", physician:"", admission:today(), diagnosis:"", allergies:"", phone:"", address:"", nextOfKin:"", nextOfKinPhone:"", nationality:"", religion:"", occupation:"", bloodGroup:"", genotype:"", insuranceName:"", insuranceNo:"", paymentMode:"Cash", referredBy:"", status:"active", notes:"" };
+  const [form, setForm] = useState(blank);
+  const setF = (k, v) => setForm(x => ({ ...x, [k]: v }));
+
+  const showToast = (msg, type = "success") => { setToastState({ msg, type }); setTimeout(() => setToastState({ msg: "", type: "success" }), 3200); };
+  const cycleTheme = () => setTheme(t => t === "light" ? "dim" : t === "dim" ? "dark" : "light");
+
+  useEffect(() => {
+    const unsub = FB.onPatients(all => setPatients(all.filter(p => !p.deleted)));
+    return () => unsub();
+  }, []);
+
+  const filtered = patients.filter(p => {
+    const matchFilter = filter === "all" ? true : (p.status || "active") === filter;
+    const matchSearch = !search || p.name?.toLowerCase().includes(search.toLowerCase()) || p.emr?.toLowerCase().includes(search.toLowerCase()) || p.diagnosis?.toLowerCase().includes(search.toLowerCase());
+    return matchFilter && matchSearch;
+  });
+
+  const selected = patients.find(p => p.id === selectedId) || null;
+
+  const handleSave = async () => {
+    if (!form.name.trim() || !form.emr.trim() || !form.ward) { showToast("Name, EMR and Ward are required.", "error"); return; }
+    setBusy(true);
+    try {
+      const now = new Date().toISOString();
+      if (editPatient) {
+        const updated = { ...editPatient, ...form, updatedAt: now, updatedBy: user.name };
+        await FB.savePatient(updated);
+        showToast("Patient record updated.");
+      } else {
+        const patient = {
+          id: "PT-" + uid(), ...form, status: "active", createdAt: now, createdBy: user.name,
+          vitals:[], medAdminLogs:[], glucoseReadings:[], fluidEntries:[],
+          prescriptions:[], nursingReports:[], statusHistory:[], transfusions:[],
+          woundRecords:[], labResults:[], doctorOrders:[],
+        };
+        await FB.savePatient(patient);
+        showToast("Patient registered successfully.");
+      }
+      setForm(blank); setShowForm(false); setEditPatient(null);
+    } catch(e) { showToast("Error: " + e.message, "error"); }
+    setBusy(false);
+  };
+
+  const handleEdit = (p) => { setForm({ name:p.name||"", emr:p.emr||"", dob:p.dob||"", gender:p.gender||"Male", ward:p.ward||"", physician:p.physician||"", admission:p.admission||today(), diagnosis:p.diagnosis||"", allergies:p.allergies||"", phone:p.phone||"", address:p.address||"", nextOfKin:p.nextOfKin||"", nextOfKinPhone:p.nextOfKinPhone||"", nationality:p.nationality||"", religion:p.religion||"", occupation:p.occupation||"", bloodGroup:p.bloodGroup||"", genotype:p.genotype||"", insuranceName:p.insuranceName||"", insuranceNo:p.insuranceNo||"", paymentMode:p.paymentMode||"Cash", referredBy:p.referredBy||"", status:p.status||"active", notes:p.notes||"" }); setEditPatient(p); setShowForm(true); setSection("register"); };
+
+  const handleDischarge = async (p) => {
+    if (!window.confirm(`Discharge ${p.name}?`)) return;
+    const updated = { ...p, status:"discharged", dischargedAt:new Date().toISOString(), dischargedBy:user.name };
+    await FB.savePatient(updated); showToast(`${p.name} discharged.`);
+  };
+
+  const handleTransfer = async (p) => {
+    const ward = window.prompt("Transfer to ward:", p.ward);
+    if (!ward) return;
+    const updated = { ...p, ward, transferredAt:new Date().toISOString(), transferredBy:user.name };
+    await FB.savePatient(updated); showToast(`${p.name} transferred to ${ward}.`);
+  };
+
+  const handleDelete = async (p) => {
+    if (!window.confirm(`Delete record for ${p.name}? This cannot be undone.`)) return;
+    await FB.deletePatient(p.id); showToast(`${p.name} removed.`, "error");
+  };
+
+  const stats = {
+    total: patients.length,
+    active: patients.filter(p => (p.status||"active") === "active").length,
+    discharged: patients.filter(p => p.status === "discharged").length,
+    today: patients.filter(p => p.admission === today() || p.createdAt?.startsWith(today())).length,
+  };
+
+  const wardCounts = WARDS.map(w => ({ ward: w.split("–")[1]?.trim() || w, count: patients.filter(p => p.ward === w && (p.status||"active") === "active").length }));
+
+  const hirdCSS = `
+    .hird-wrap { display:flex; min-height:100vh; background:var(--bg,#f0f4f8); font-family:'Inter',sans-serif; }
+    .hird-sidebar { width:230px; background:linear-gradient(160deg,#0a1f44 0%,#1a3a6b 100%); color:#fff; display:flex; flex-direction:column; position:fixed; height:100vh; overflow-y:auto; z-index:100; transition:transform 0.25s; }
+    .hird-sidebar.closed { transform:translateX(-230px); }
+    .hird-logo { padding:20px 16px 12px; border-bottom:1px solid rgba(255,255,255,0.1); }
+    .hird-logo-title { font-size:13px; font-weight:800; letter-spacing:0.5px; color:#fff; }
+    .hird-logo-sub { font-size:10px; color:rgba(255,255,255,0.5); margin-top:2px; }
+    .hird-user { padding:12px 16px; border-bottom:1px solid rgba(255,255,255,0.08); display:flex; align-items:center; gap:10px; }
+    .hird-avatar { width:34px; height:34px; border-radius:50%; background:rgba(255,255,255,0.18); display:flex; align-items:center; justify-content:center; font-weight:700; font-size:14px; }
+    .hird-uname { font-size:12px; font-weight:600; }
+    .hird-urole { font-size:10px; color:rgba(255,255,255,0.5); }
+    .hird-nav { padding:10px 8px; flex:1; }
+    .hird-nav-section { font-size:9px; font-weight:700; color:rgba(255,255,255,0.35); text-transform:uppercase; letter-spacing:1.2px; padding:10px 8px 4px; }
+    .hird-nav-btn { display:flex; align-items:center; gap:9px; width:100%; padding:9px 10px; border:none; background:none; color:rgba(255,255,255,0.75); font-size:12px; border-radius:8px; cursor:pointer; text-align:left; transition:all 0.15s; margin-bottom:2px; }
+    .hird-nav-btn:hover, .hird-nav-btn.active { background:rgba(255,255,255,0.12); color:#fff; }
+    .hird-nav-btn.active { background:rgba(255,255,255,0.18); font-weight:600; }
+    .hird-main { margin-left:230px; flex:1; display:flex; flex-direction:column; min-height:100vh; }
+    .hird-topbar { background:#fff; border-bottom:1px solid #e2e8f0; padding:0 24px; height:56px; display:flex; align-items:center; gap:14px; position:sticky; top:0; z-index:50; }
+    .hird-topbar-title { font-size:15px; font-weight:700; color:#1e3a5f; }
+    .hird-topbar-sub { font-size:11px; color:#94a3b8; }
+    .hird-content { padding:24px; flex:1; }
+    .hird-stats { display:grid; grid-template-columns:repeat(4,1fr); gap:14px; margin-bottom:24px; }
+    .hird-stat { background:#fff; border-radius:12px; padding:16px 18px; border:1px solid #e2e8f0; }
+    .hird-stat-val { font-size:28px; font-weight:800; color:#1e3a5f; }
+    .hird-stat-label { font-size:11px; color:#94a3b8; margin-top:2px; }
+    .hird-stat-icon { font-size:20px; margin-bottom:6px; }
+    .hird-card { background:#fff; border-radius:12px; border:1px solid #e2e8f0; padding:20px; margin-bottom:20px; }
+    .hird-card-title { font-size:13px; font-weight:700; color:#1e3a5f; margin-bottom:14px; display:flex; align-items:center; gap:7px; }
+    .hird-form-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+    .hird-form-grid-3 { display:grid; grid-template-columns:1fr 1fr 1fr; gap:12px; }
+    .hird-form-group { display:flex; flex-direction:column; gap:4px; }
+    .hird-form-group.full { grid-column:1/-1; }
+    .hird-label { font-size:11px; font-weight:600; color:#475569; }
+    .hird-input { border:1px solid #e2e8f0; border-radius:7px; padding:8px 10px; font-size:12px; color:#1e293b; outline:none; transition:border 0.15s; }
+    .hird-input:focus { border-color:#1a3a6b; }
+    .hird-select { border:1px solid #e2e8f0; border-radius:7px; padding:8px 10px; font-size:12px; color:#1e293b; outline:none; background:#fff; }
+    .hird-section-head { font-size:11px; font-weight:700; color:#1a3a6b; background:#eff6ff; border-radius:6px; padding:6px 10px; margin:14px 0 10px; grid-column:1/-1; letter-spacing:0.3px; }
+    .hird-btn { border:none; border-radius:8px; padding:9px 18px; font-size:12px; font-weight:600; cursor:pointer; transition:all 0.15s; display:inline-flex; align-items:center; gap:6px; }
+    .hird-btn-primary { background:#1a3a6b; color:#fff; } .hird-btn-primary:hover { background:#0f2849; }
+    .hird-btn-ghost { background:#f1f5f9; color:#475569; } .hird-btn-ghost:hover { background:#e2e8f0; }
+    .hird-btn-danger { background:#fee2e2; color:#dc2626; } .hird-btn-danger:hover { background:#fecaca; }
+    .hird-btn-success { background:#d1fae5; color:#059669; } .hird-btn-success:hover { background:#a7f3d0; }
+    .hird-btn-warning { background:#fef3c7; color:#d97706; } .hird-btn-warning:hover { background:#fde68a; }
+    .hird-table { width:100%; border-collapse:collapse; font-size:12px; }
+    .hird-table th { background:#f8fafc; color:#64748b; font-size:10px; font-weight:700; text-transform:uppercase; padding:9px 12px; text-align:left; border-bottom:1px solid #e2e8f0; }
+    .hird-table td { padding:10px 12px; border-bottom:1px solid #f1f5f9; color:#334155; vertical-align:top; }
+    .hird-table tr:hover td { background:#f8fafc; }
+    .hird-badge { display:inline-flex; align-items:center; padding:2px 9px; border-radius:20px; font-size:10px; font-weight:600; }
+    .hird-badge-active { background:#d1fae5; color:#059669; }
+    .hird-badge-discharged { background:#f1f5f9; color:#64748b; }
+    .hird-badge-critical { background:#fee2e2; color:#dc2626; }
+    .hird-search { border:1px solid #e2e8f0; border-radius:8px; padding:8px 12px; font-size:12px; outline:none; width:240px; }
+    .hird-search:focus { border-color:#1a3a6b; }
+    .hird-filter-tabs { display:flex; gap:4px; }
+    .hird-filter-tab { border:1px solid #e2e8f0; background:#fff; border-radius:6px; padding:5px 12px; font-size:11px; font-weight:600; color:#64748b; cursor:pointer; }
+    .hird-filter-tab.active { background:#1a3a6b; color:#fff; border-color:#1a3a6b; }
+    .hird-actions { display:flex; gap:6px; flex-wrap:wrap; }
+    .hird-ward-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:10px; }
+    .hird-ward-card { background:#fff; border:1px solid #e2e8f0; border-radius:10px; padding:14px; }
+    .hird-ward-name { font-size:11px; color:#64748b; margin-bottom:4px; }
+    .hird-ward-count { font-size:22px; font-weight:800; color:#1e3a5f; }
+    .hird-detail-grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+    .hird-detail-item { background:#f8fafc; border-radius:8px; padding:10px 12px; }
+    .hird-detail-key { font-size:10px; color:#94a3b8; font-weight:600; margin-bottom:2px; }
+    .hird-detail-val { font-size:12px; font-weight:600; color:#1e293b; }
+    .hird-hamburger { display:none; background:none; border:none; font-size:20px; cursor:pointer; }
+    .hird-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.3); z-index:99; }
+    @media(max-width:768px) {
+      .hird-sidebar { transform:translateX(-230px); }
+      .hird-sidebar.open { transform:translateX(0); }
+      .hird-main { margin-left:0; }
+      .hird-hamburger { display:block; }
+      .hird-stats { grid-template-columns:1fr 1fr; }
+      .hird-form-grid, .hird-form-grid-3 { grid-template-columns:1fr; }
+      .hird-ward-grid { grid-template-columns:1fr 1fr; }
+      .hird-overlay.open { display:block; }
+      .hird-search { width:140px; }
+    }
+  `;
+
+  return (
+    <div className={`hird-wrap${theme === "dim" ? " theme-dim" : theme === "dark" ? " theme-dark" : ""}`}>
+      <style>{hirdCSS}</style>
+      <Toast msg={toastState.msg} type={toastState.type} />
+
+      <div className={`hird-overlay${sidebarOpen ? " open" : ""}`} onClick={() => setSidebarOpen(false)} />
+
+      {/* Sidebar */}
+      <nav className={`hird-sidebar${sidebarOpen ? " open" : ""}`}>
+        <div className="hird-logo">
+          <div className="hird-logo-title">🗂️ HIRD</div>
+          <div className="hird-logo-sub">Health Information Records</div>
+        </div>
+        <div className="hird-user">
+          <div className="hird-avatar">{(user.name||"H").charAt(0).toUpperCase()}</div>
+          <div><div className="hird-uname">{user.name}</div><div className="hird-urole">Records Officer</div></div>
+        </div>
+        <div className="hird-nav">
+          <div className="hird-nav-section">Patient Records</div>
+          <button className={`hird-nav-btn${section==="register"?"  active":""}`} onClick={()=>{setSection("register");setShowForm(false);setEditPatient(null);setForm(blank);setSidebarOpen(false);}}>
+            <span>➕</span>Register Patient
+          </button>
+          <button className={`hird-nav-btn${section==="records"?" active":""}`} onClick={()=>{setSection("records");setSidebarOpen(false);}}>
+            <span>📋</span>Patient Index
+          </button>
+          <button className={`hird-nav-btn${section==="view"?" active":""}`} onClick={()=>{setSection("view");setSidebarOpen(false);}}>
+            <span>🔍</span>View / Search
+          </button>
+          <div className="hird-nav-section">Operations</div>
+          <button className={`hird-nav-btn${section==="admissions"?" active":""}`} onClick={()=>{setSection("admissions");setSidebarOpen(false);}}>
+            <span>🏥</span>Admissions
+          </button>
+          <button className={`hird-nav-btn${section==="discharge"?" active":""}`} onClick={()=>{setSection("discharge");setSidebarOpen(false);}}>
+            <span>🚪</span>Discharge Records
+          </button>
+          <button className={`hird-nav-btn${section==="transfer"?" active":""}`} onClick={()=>{setSection("transfer");setSidebarOpen(false);}}>
+            <span>🔄</span>Ward Transfers
+          </button>
+          <div className="hird-nav-section">Reports</div>
+          <button className={`hird-nav-btn${section==="statistics"?" active":""}`} onClick={()=>{setSection("statistics");setSidebarOpen(false);}}>
+            <span>📊</span>Statistics
+          </button>
+          <button className={`hird-nav-btn${section==="census"?" active":""}`} onClick={()=>{setSection("census");setSidebarOpen(false);}}>
+            <span>🗃️</span>Ward Census
+          </button>
+          <div className="hird-nav-section">System</div>
+          <button className="hird-nav-btn" onClick={cycleTheme}><span>{theme==="light"?"🌙":theme==="dim"?"⬛":"☀️"}</span>{theme==="light"?"Dim Mode":theme==="dim"?"Dark Mode":"Light Mode"}</button>
+          <button className="hird-nav-btn" style={{color:"#f87171"}} onClick={onLogout}><span>🚪</span>Logout</button>
+        </div>
+      </nav>
+
+      {/* Main */}
+      <div className="hird-main">
+        <div className="hird-topbar">
+          <button className="hird-hamburger" onClick={()=>setSidebarOpen(o=>!o)}>☰</button>
+          <div>
+            <div className="hird-topbar-title">
+              {section==="register"?(editPatient?"Edit Patient Record":"Register New Patient"):section==="records"?"Patient Index":section==="view"?"Patient Search":section==="admissions"?"Today's Admissions":section==="discharge"?"Discharge Records":section==="transfer"?"Ward Transfers":section==="statistics"?"Statistics & Reports":"Ward Census"}
+            </div>
+            <div className="hird-topbar-sub">Health Information Records Department</div>
+          </div>
+          <div style={{marginLeft:"auto",display:"flex",gap:10,alignItems:"center"}}>
+            <span style={{fontSize:11,color:"#94a3b8"}}>👤 {user.name}</span>
+          </div>
+        </div>
+
+        <div className="hird-content">
+          {/* Stats always visible */}
+          <div className="hird-stats">
+            {[
+              {icon:"👥",val:stats.total,label:"Total Records"},
+              {icon:"🏥",val:stats.active,label:"Admitted Patients"},
+              {icon:"🚪",val:stats.discharged,label:"Discharged"},
+              {icon:"📅",val:stats.today,label:"Registered Today"},
+            ].map((s,i)=>(
+              <div key={i} className="hird-stat">
+                <div className="hird-stat-icon">{s.icon}</div>
+                <div className="hird-stat-val">{s.val}</div>
+                <div className="hird-stat-label">{s.label}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* ── REGISTER PATIENT ── */}
+          {section === "register" && (
+            <div className="hird-card">
+              <div className="hird-card-title">🗂️ {editPatient?"Update Patient Record":"New Patient Registration Form"}</div>
+              <div className="hird-form-grid">
+                <div className="hird-section-head">👤 Personal Information</div>
+                <div className="hird-form-group"><label className="hird-label">Full Name *</label><input className="hird-input" value={form.name} onChange={e=>setF("name",e.target.value)} placeholder="Patient full name" /></div>
+                <div className="hird-form-group"><label className="hird-label">EMR / MRN *</label><input className="hird-input" value={form.emr} onChange={e=>setF("emr",e.target.value)} placeholder="Medical record number" /></div>
+                <div className="hird-form-group"><label className="hird-label">Date of Birth</label><input className="hird-input" type="date" value={form.dob} onChange={e=>setF("dob",e.target.value)} /></div>
+                <div className="hird-form-group"><label className="hird-label">Gender</label><select className="hird-select" value={form.gender} onChange={e=>setF("gender",e.target.value)}><option>Male</option><option>Female</option><option>Other</option></select></div>
+                <div className="hird-form-group"><label className="hird-label">Phone Number</label><input className="hird-input" value={form.phone} onChange={e=>setF("phone",e.target.value)} placeholder="e.g. 08012345678" /></div>
+                <div className="hird-form-group"><label className="hird-label">Nationality</label><input className="hird-input" value={form.nationality} onChange={e=>setF("nationality",e.target.value)} placeholder="e.g. Nigerian" /></div>
+                <div className="hird-form-group"><label className="hird-label">Religion</label><input className="hird-input" value={form.religion} onChange={e=>setF("religion",e.target.value)} placeholder="e.g. Christianity / Islam" /></div>
+                <div className="hird-form-group"><label className="hird-label">Occupation</label><input className="hird-input" value={form.occupation} onChange={e=>setF("occupation",e.target.value)} placeholder="Patient's occupation" /></div>
+                <div className="hird-form-group full"><label className="hird-label">Home Address</label><input className="hird-input" value={form.address} onChange={e=>setF("address",e.target.value)} placeholder="Residential address" /></div>
+
+                <div className="hird-section-head">🩸 Clinical Information</div>
+                <div className="hird-form-group"><label className="hird-label">Blood Group</label><select className="hird-select" value={form.bloodGroup} onChange={e=>setF("bloodGroup",e.target.value)}><option value="">Select</option>{["A+","A-","B+","B-","AB+","AB-","O+","O-"].map(g=><option key={g}>{g}</option>)}</select></div>
+                <div className="hird-form-group"><label className="hird-label">Genotype</label><select className="hird-select" value={form.genotype} onChange={e=>setF("genotype",e.target.value)}><option value="">Select</option>{["AA","AS","SS","AC","SC"].map(g=><option key={g}>{g}</option>)}</select></div>
+                <div className="hird-form-group"><label className="hird-label">Known Allergies</label><input className="hird-input" value={form.allergies} onChange={e=>setF("allergies",e.target.value)} placeholder="e.g. Penicillin / NKDA" /></div>
+                <div className="hird-form-group"><label className="hird-label">Primary Diagnosis</label><input className="hird-input" value={form.diagnosis} onChange={e=>setF("diagnosis",e.target.value)} placeholder="e.g. Hypertension" /></div>
+
+                <div className="hird-section-head">🏥 Admission Details</div>
+                <div className="hird-form-group"><label className="hird-label">Ward *</label><select className="hird-select" value={form.ward} onChange={e=>setF("ward",e.target.value)}><option value="">Select ward</option>{WARDS.map(w=><option key={w}>{w}</option>)}</select></div>
+                <div className="hird-form-group"><label className="hird-label">Admission Date</label><input className="hird-input" type="date" value={form.admission} onChange={e=>setF("admission",e.target.value)} /></div>
+                <div className="hird-form-group"><label className="hird-label">Attending Physician</label><input className="hird-input" value={form.physician} onChange={e=>setF("physician",e.target.value)} placeholder="Physician name" /></div>
+                <div className="hird-form-group"><label className="hird-label">Referred By</label><input className="hird-input" value={form.referredBy} onChange={e=>setF("referredBy",e.target.value)} placeholder="Referral source" /></div>
+
+                <div className="hird-section-head">💳 Insurance & Payment</div>
+                <div className="hird-form-group"><label className="hird-label">Payment Mode</label><select className="hird-select" value={form.paymentMode} onChange={e=>setF("paymentMode",e.target.value)}><option>Cash</option><option>NHIS</option><option>Private Insurance</option><option>Government</option><option>Waiver</option></select></div>
+                <div className="hird-form-group"><label className="hird-label">Insurance Provider</label><input className="hird-input" value={form.insuranceName} onChange={e=>setF("insuranceName",e.target.value)} placeholder="e.g. Hygeia HMO" /></div>
+                <div className="hird-form-group"><label className="hird-label">Insurance / NHIS No.</label><input className="hird-input" value={form.insuranceNo} onChange={e=>setF("insuranceNo",e.target.value)} placeholder="Policy / ID number" /></div>
+
+                <div className="hird-section-head">🆘 Next of Kin</div>
+                <div className="hird-form-group"><label className="hird-label">Next of Kin Name</label><input className="hird-input" value={form.nextOfKin} onChange={e=>setF("nextOfKin",e.target.value)} placeholder="Full name" /></div>
+                <div className="hird-form-group"><label className="hird-label">Next of Kin Phone</label><input className="hird-input" value={form.nextOfKinPhone} onChange={e=>setF("nextOfKinPhone",e.target.value)} placeholder="Phone number" /></div>
+
+                <div className="hird-section-head">📝 Additional Notes</div>
+                <div className="hird-form-group full"><label className="hird-label">Notes / Remarks</label><textarea className="hird-input" rows={3} value={form.notes} onChange={e=>setF("notes",e.target.value)} placeholder="Any additional notes or remarks..." style={{resize:"vertical"}} /></div>
+              </div>
+              <div style={{display:"flex",gap:10,marginTop:18,justifyContent:"flex-end"}}>
+                {editPatient && <button className="hird-btn hird-btn-ghost" onClick={()=>{setEditPatient(null);setForm(blank);}}>✕ Cancel Edit</button>}
+                <button className="hird-btn hird-btn-primary" onClick={handleSave} disabled={busy}>{busy?"Saving…":editPatient?"✓ Update Record":"✚ Register Patient"}</button>
+              </div>
+            </div>
+          )}
+
+          {/* ── PATIENT INDEX ── */}
+          {section === "records" && (
+            <div className="hird-card">
+              <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:14,flexWrap:"wrap"}}>
+                <div className="hird-card-title" style={{marginBottom:0}}>📋 Patient Index</div>
+                <input className="hird-search" placeholder="Search name, EMR, diagnosis…" value={search} onChange={e=>setSearch(e.target.value)} />
+                <div className="hird-filter-tabs">
+                  {[["active","Active"],["discharged","Discharged"],["all","All"]].map(([f,l])=>(
+                    <button key={f} className={`hird-filter-tab${filter===f?" active":""}`} onClick={()=>setFilter(f)}>{l}</button>
+                  ))}
+                </div>
+                <button className="hird-btn hird-btn-primary" style={{marginLeft:"auto"}} onClick={()=>{setSection("register");setShowForm(false);setEditPatient(null);setForm(blank);}}>➕ Register New</button>
+              </div>
+              <div style={{overflowX:"auto"}}>
+                <table className="hird-table">
+                  <thead><tr><th>EMR</th><th>Name</th><th>DOB</th><th>Ward</th><th>Physician</th><th>Admission</th><th>Diagnosis</th><th>Payment</th><th>Status</th><th>Actions</th></tr></thead>
+                  <tbody>
+                    {filtered.length===0 ? (
+                      <tr><td colSpan={10} style={{textAlign:"center",color:"#94a3b8",padding:"30px"}}>No records found.</td></tr>
+                    ) : filtered.map(p=>(
+                      <tr key={p.id}>
+                        <td style={{fontFamily:"monospace",fontWeight:700,color:"#1a3a6b"}}>{p.emr}</td>
+                        <td style={{fontWeight:600}}>{p.name}</td>
+                        <td>{p.dob||"—"}</td>
+                        <td style={{fontSize:11}}>{p.ward?.split("–")[0]?.trim()||"—"}</td>
+                        <td>{p.physician||"—"}</td>
+                        <td style={{whiteSpace:"nowrap"}}>{p.admission||"—"}</td>
+                        <td style={{maxWidth:140,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.diagnosis||"—"}</td>
+                        <td><span style={{fontSize:10}}>{p.paymentMode||"Cash"}</span></td>
+                        <td><span className={`hird-badge hird-badge-${p.status||"active"}`}>{p.status||"Active"}</span></td>
+                        <td>
+                          <div className="hird-actions">
+                            <button className="hird-btn hird-btn-ghost" style={{padding:"4px 8px",fontSize:11}} onClick={()=>{setSelectedId(p.id);setSection("view");}}>👁</button>
+                            <button className="hird-btn hird-btn-ghost" style={{padding:"4px 8px",fontSize:11}} onClick={()=>handleEdit(p)}>✏️</button>
+                            {(p.status||"active")==="active" && <button className="hird-btn hird-btn-warning" style={{padding:"4px 8px",fontSize:11}} onClick={()=>handleDischarge(p)}>🚪</button>}
+                            {(p.status||"active")==="active" && <button className="hird-btn hird-btn-success" style={{padding:"4px 8px",fontSize:11}} onClick={()=>handleTransfer(p)}>🔄</button>}
+                            <button className="hird-btn hird-btn-danger" style={{padding:"4px 8px",fontSize:11}} onClick={()=>handleDelete(p)}>🗑</button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <div style={{marginTop:10,fontSize:11,color:"#94a3b8"}}>Showing {filtered.length} of {patients.length} records</div>
+            </div>
+          )}
+
+          {/* ── VIEW PATIENT ── */}
+          {section === "view" && (
+            <div>
+              <div style={{display:"flex",gap:10,marginBottom:14,alignItems:"center"}}>
+                <input className="hird-search" style={{width:"100%",maxWidth:340}} placeholder="Search by name, EMR, diagnosis…" value={search} onChange={e=>{setSearch(e.target.value);setSelectedId(null);}} />
+              </div>
+              {!selectedId ? (
+                <div className="hird-card">
+                  <table className="hird-table">
+                    <thead><tr><th>EMR</th><th>Name</th><th>Gender</th><th>Ward</th><th>Diagnosis</th><th>Status</th><th></th></tr></thead>
+                    <tbody>
+                      {patients.filter(p=>!search||p.name?.toLowerCase().includes(search.toLowerCase())||p.emr?.toLowerCase().includes(search.toLowerCase())||p.diagnosis?.toLowerCase().includes(search.toLowerCase())).slice(0,30).map(p=>(
+                        <tr key={p.id} style={{cursor:"pointer"}} onClick={()=>setSelectedId(p.id)}>
+                          <td style={{fontFamily:"monospace",fontWeight:700,color:"#1a3a6b"}}>{p.emr}</td>
+                          <td style={{fontWeight:600}}>{p.name}</td>
+                          <td>{p.gender||"—"}</td>
+                          <td style={{fontSize:11}}>{p.ward?.split("–")[0]?.trim()||"—"}</td>
+                          <td>{p.diagnosis||"—"}</td>
+                          <td><span className={`hird-badge hird-badge-${p.status||"active"}`}>{p.status||"Active"}</span></td>
+                          <td><button className="hird-btn hird-btn-ghost" style={{padding:"3px 9px",fontSize:11}}>View →</button></td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                (() => {
+                  const p = patients.find(x=>x.id===selectedId);
+                  if (!p) return <div>Patient not found.</div>;
+                  return (
+                    <div>
+                      <button className="hird-btn hird-btn-ghost" style={{marginBottom:14}} onClick={()=>setSelectedId(null)}>← Back to Search</button>
+                      <div className="hird-card">
+                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:10,marginBottom:16}}>
+                          <div>
+                            <div style={{fontSize:18,fontWeight:800,color:"#1e3a5f"}}>{p.name}</div>
+                            <div style={{fontSize:12,color:"#64748b"}}>EMR: {p.emr} · {p.ward}</div>
+                          </div>
+                          <div style={{display:"flex",gap:8}}>
+                            <span className={`hird-badge hird-badge-${p.status||"active"}`} style={{fontSize:12,padding:"4px 12px"}}>{p.status||"Active"}</span>
+                            <button className="hird-btn hird-btn-ghost" onClick={()=>handleEdit(p)}>✏️ Edit</button>
+                          </div>
+                        </div>
+                        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:20}}>
+                          <div>
+                            <div style={{fontWeight:700,color:"#1a3a6b",fontSize:12,marginBottom:8}}>👤 Personal</div>
+                            <div className="hird-detail-grid">
+                              {[["Date of Birth",p.dob||"—"],["Gender",p.gender||"—"],["Phone",p.phone||"—"],["Nationality",p.nationality||"—"],["Religion",p.religion||"—"],["Occupation",p.occupation||"—"],["Address",p.address||"—","full"]].map(([k,v,full])=>(
+                                <div key={k} className="hird-detail-item" style={full?{gridColumn:"1/-1"}:{}}><div className="hird-detail-key">{k}</div><div className="hird-detail-val">{v}</div></div>
+                              ))}
+                            </div>
+                          </div>
+                          <div>
+                            <div style={{fontWeight:700,color:"#1a3a6b",fontSize:12,marginBottom:8}}>🏥 Clinical</div>
+                            <div className="hird-detail-grid">
+                              {[["Blood Group",p.bloodGroup||"—"],["Genotype",p.genotype||"—"],["Allergies",p.allergies||"NKDA"],["Diagnosis",p.diagnosis||"—"],["Physician",p.physician||"—"],["Ward",p.ward||"—"],["Admission",p.admission||"—"],["Referred By",p.referredBy||"—"]].map(([k,v])=>(
+                                <div key={k} className="hird-detail-item"><div className="hird-detail-key">{k}</div><div className="hird-detail-val">{v}</div></div>
+                              ))}
+                            </div>
+                            <div style={{fontWeight:700,color:"#1a3a6b",fontSize:12,margin:"14px 0 8px"}}>💳 Payment</div>
+                            <div className="hird-detail-grid">
+                              {[["Payment Mode",p.paymentMode||"Cash"],["Insurance",p.insuranceName||"—"],["Insurance No.",p.insuranceNo||"—"]].map(([k,v])=>(
+                                <div key={k} className="hird-detail-item"><div className="hird-detail-key">{k}</div><div className="hird-detail-val">{v}</div></div>
+                              ))}
+                            </div>
+                            <div style={{fontWeight:700,color:"#1a3a6b",fontSize:12,margin:"14px 0 8px"}}>🆘 Next of Kin</div>
+                            <div className="hird-detail-grid">
+                              {[["Name",p.nextOfKin||"—"],["Phone",p.nextOfKinPhone||"—"]].map(([k,v])=>(
+                                <div key={k} className="hird-detail-item"><div className="hird-detail-key">{k}</div><div className="hird-detail-val">{v}</div></div>
+                              ))}
+                            </div>
+                          </div>
+                        </div>
+                        {p.notes && <div style={{marginTop:14,background:"#f8fafc",borderRadius:8,padding:"10px 14px"}}><div style={{fontSize:10,color:"#94a3b8",fontWeight:700,marginBottom:3}}>NOTES</div><div style={{fontSize:12,color:"#334155"}}>{p.notes}</div></div>}
+                        <div style={{marginTop:10,fontSize:10,color:"#94a3b8"}}>Registered by {p.createdBy||"—"} · {p.createdAt?new Date(p.createdAt).toLocaleString():"—"}</div>
+                      </div>
+                    </div>
+                  );
+                })()
+              )}
+            </div>
+          )}
+
+          {/* ── ADMISSIONS ── */}
+          {section === "admissions" && (
+            <div className="hird-card">
+              <div className="hird-card-title">🏥 Today's Admissions — {today()}</div>
+              <table className="hird-table">
+                <thead><tr><th>EMR</th><th>Name</th><th>Gender</th><th>Ward</th><th>Physician</th><th>Diagnosis</th><th>Payment</th><th>Registered By</th></tr></thead>
+                <tbody>
+                  {patients.filter(p=>p.admission===today()||p.createdAt?.startsWith(today())).length===0
+                    ? <tr><td colSpan={8} style={{textAlign:"center",color:"#94a3b8",padding:30}}>No admissions today.</td></tr>
+                    : patients.filter(p=>p.admission===today()||p.createdAt?.startsWith(today())).map(p=>(
+                      <tr key={p.id}>
+                        <td style={{fontFamily:"monospace",fontWeight:700,color:"#1a3a6b"}}>{p.emr}</td>
+                        <td style={{fontWeight:600}}>{p.name}</td>
+                        <td>{p.gender||"—"}</td>
+                        <td style={{fontSize:11}}>{p.ward?.split("–")[0]?.trim()||"—"}</td>
+                        <td>{p.physician||"—"}</td>
+                        <td>{p.diagnosis||"—"}</td>
+                        <td>{p.paymentMode||"Cash"}</td>
+                        <td style={{fontSize:11,color:"#64748b"}}>{p.createdBy||"—"}</td>
+                      </tr>
+                    ))
+                  }
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {/* ── DISCHARGE RECORDS ── */}
+          {section === "discharge" && (
+            <div className="hird-card">
+              <div className="hird-card-title">🚪 Discharge Records</div>
+              <table className="hird-table">
+                <thead><tr><th>EMR</th><th>Name</th><th>Ward</th><th>Diagnosis</th><th>Admission</th><th>Discharge Date</th><th>Discharged By</th></tr></thead>
+                <tbody>
+                  {patients.filter(p=>p.status==="discharged").length===0
+                    ? <tr><td colSpan={7} style={{textAlign:"center",color:"#94a3b8",padding:30}}>No discharge records.</td></tr>
+                    : patients.filter(p=>p.status==="discharged").map(p=>(
+                      <tr key={p.id}>
+                        <td style={{fontFamily:"monospace",fontWeight:700,color:"#1a3a6b"}}>{p.emr}</td>
+                        <td style={{fontWeight:600}}>{p.name}</td>
+                        <td style={{fontSize:11}}>{p.ward?.split("–")[0]?.trim()||"—"}</td>
+                        <td>{p.diagnosis||"—"}</td>
+                        <td>{p.admission||"—"}</td>
+                        <td style={{whiteSpace:"nowrap"}}>{p.dischargedAt?new Date(p.dischargedAt).toLocaleDateString():"—"}</td>
+                        <td style={{fontSize:11,color:"#64748b"}}>{p.dischargedBy||"—"}</td>
+                      </tr>
+                    ))
+                  }
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {/* ── WARD TRANSFERS ── */}
+          {section === "transfer" && (
+            <div className="hird-card">
+              <div className="hird-card-title">🔄 Ward Transfer Log</div>
+              <table className="hird-table">
+                <thead><tr><th>EMR</th><th>Name</th><th>Current Ward</th><th>Transferred At</th><th>Transferred By</th><th>Status</th></tr></thead>
+                <tbody>
+                  {patients.filter(p=>p.transferredAt).length===0
+                    ? <tr><td colSpan={6} style={{textAlign:"center",color:"#94a3b8",padding:30}}>No transfer records.</td></tr>
+                    : patients.filter(p=>p.transferredAt).map(p=>(
+                      <tr key={p.id}>
+                        <td style={{fontFamily:"monospace",fontWeight:700,color:"#1a3a6b"}}>{p.emr}</td>
+                        <td style={{fontWeight:600}}>{p.name}</td>
+                        <td style={{fontSize:11}}>{p.ward?.split("–")[0]?.trim()||"—"}</td>
+                        <td style={{whiteSpace:"nowrap"}}>{p.transferredAt?new Date(p.transferredAt).toLocaleString():"—"}</td>
+                        <td style={{fontSize:11,color:"#64748b"}}>{p.transferredBy||"—"}</td>
+                        <td><span className={`hird-badge hird-badge-${p.status||"active"}`}>{p.status||"Active"}</span></td>
+                      </tr>
+                    ))
+                  }
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {/* ── STATISTICS ── */}
+          {section === "statistics" && (
+            <div>
+              <div className="hird-card">
+                <div className="hird-card-title">📊 Patient Statistics Summary</div>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:20}}>
+                  <div>
+                    <div style={{fontWeight:700,color:"#1a3a6b",fontSize:12,marginBottom:10}}>By Status</div>
+                    {[["Active / Admitted",stats.active,"#059669"],["Discharged",stats.discharged,"#64748b"]].map(([label,val,color])=>(
+                      <div key={label} style={{display:"flex",justifyContent:"space-between",padding:"8px 12px",background:"#f8fafc",borderRadius:8,marginBottom:6}}>
+                        <span style={{fontSize:12,color:"#334155"}}>{label}</span>
+                        <span style={{fontSize:14,fontWeight:700,color}}>{val}</span>
+                      </div>
+                    ))}
+                  </div>
+                  <div>
+                    <div style={{fontWeight:700,color:"#1a3a6b",fontSize:12,marginBottom:10}}>By Payment Mode</div>
+                    {["Cash","NHIS","Private Insurance","Government","Waiver"].map(mode=>{
+                      const count=patients.filter(p=>p.paymentMode===mode).length;
+                      return count>0?<div key={mode} style={{display:"flex",justifyContent:"space-between",padding:"8px 12px",background:"#f8fafc",borderRadius:8,marginBottom:6}}><span style={{fontSize:12,color:"#334155"}}>{mode}</span><span style={{fontSize:14,fontWeight:700,color:"#1a3a6b"}}>{count}</span></div>:null;
+                    })}
+                  </div>
+                  <div>
+                    <div style={{fontWeight:700,color:"#1a3a6b",fontSize:12,marginBottom:10}}>By Gender</div>
+                    {["Male","Female","Other"].map(g=>{
+                      const count=patients.filter(p=>p.gender===g).length;
+                      return <div key={g} style={{display:"flex",justifyContent:"space-between",padding:"8px 12px",background:"#f8fafc",borderRadius:8,marginBottom:6}}><span style={{fontSize:12,color:"#334155"}}>{g}</span><span style={{fontSize:14,fontWeight:700,color:"#1a3a6b"}}>{count}</span></div>;
+                    })}
+                  </div>
+                  <div>
+                    <div style={{fontWeight:700,color:"#1a3a6b",fontSize:12,marginBottom:10}}>Blood Group Distribution</div>
+                    {["A+","A-","B+","B-","AB+","AB-","O+","O-"].map(bg=>{
+                      const count=patients.filter(p=>p.bloodGroup===bg).length;
+                      return count>0?<div key={bg} style={{display:"flex",justifyContent:"space-between",padding:"8px 12px",background:"#f8fafc",borderRadius:8,marginBottom:6}}><span style={{fontSize:12,color:"#334155"}}>{bg}</span><span style={{fontSize:14,fontWeight:700,color:"#1a3a6b"}}>{count}</span></div>:null;
+                    })}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ── WARD CENSUS ── */}
+          {section === "census" && (
+            <div className="hird-card">
+              <div className="hird-card-title">🗃️ Ward Census — Active Patients</div>
+              <div className="hird-ward-grid">
+                {wardCounts.map(w=>(
+                  <div key={w.ward} className="hird-ward-card">
+                    <div className="hird-ward-name">{w.ward}</div>
+                    <div className="hird-ward-count">{w.count}</div>
+                    <div style={{fontSize:10,color:"#94a3b8",marginTop:2}}>active patients</div>
+                  </div>
+                ))}
+              </div>
+              <div style={{marginTop:20}}>
+                <div style={{fontWeight:700,color:"#1a3a6b",fontSize:12,marginBottom:10}}>Detailed Breakdown</div>
+                <table className="hird-table">
+                  <thead><tr><th>Ward</th><th>Active</th><th>Discharged</th><th>Total</th></tr></thead>
+                  <tbody>
+                    {WARDS.map(w=>{
+                      const active=patients.filter(p=>p.ward===w&&(p.status||"active")==="active").length;
+                      const discharged=patients.filter(p=>p.ward===w&&p.status==="discharged").length;
+                      return <tr key={w}><td style={{fontSize:12}}>{w}</td><td style={{fontWeight:700,color:"#059669"}}>{active}</td><td style={{color:"#64748b"}}>{discharged}</td><td style={{fontWeight:700}}>{active+discharged}</td></tr>;
+                    })}
+                    <tr style={{background:"#f0f4f8"}}><td style={{fontWeight:700}}>TOTAL</td><td style={{fontWeight:700,color:"#059669"}}>{stats.active}</td><td style={{fontWeight:700,color:"#64748b"}}>{stats.discharged}</td><td style={{fontWeight:800,color:"#1a3a6b"}}>{stats.total}</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
   const [user, setUser] = useState(null);
   const [isAdmin, setIsAdmin] = useState(false);
   const [checking, setChecking] = useState(true);
@@ -6258,5 +6834,6 @@ export default function App() {
   if (user.role === "dental") return <DentalDashboard user={user} onLogout={handleLogout} />;
   if (user.role === "publichealth") return <PublicHealthDashboard user={user} onLogout={handleLogout} />;
   if (user.role === "dot") return <DOTDashboard user={user} onLogout={handleLogout} />;
+  if (user.role === "hird") return <HIRDDashboard user={user} onLogout={handleLogout} />;
   return <MainApp user={user} onLogout={handleLogout} />;
 }
