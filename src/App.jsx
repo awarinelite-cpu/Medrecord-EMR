@@ -32,7 +32,7 @@ const FB = {
   logout: () => signOut(auth),
   forgotPassword: (e) => sendPasswordResetEmail(auth, e),
   onAuth: (cb) => onAuthStateChanged(auth, cb),
-  getProfile: async (uid) => { const s = await getDoc(doc(db, "users", uid)); return s.exists() ? s.data() : null; },
+  getProfile: async (uid) => { try { const s = await getDoc(doc(db, "users", uid)); console.log("[getProfile] uid:", uid, "exists:", s.exists()); return s.exists() ? s.data() : null; } catch(err) { console.error("[getProfile] ERROR:", err.code, err.message); return null; } },
   getUsers: async () => { const s = await getDocs(collection(db, "users")); return s.docs.map(d => d.data()); },
   savePatient: async (p) => { await setDoc(doc(db, "patients", p.id), { ...p, updatedAt: serverTimestamp() }); },
   onPatients: (cb) => { const q = query(collection(db, "patients"), orderBy("createdAt", "desc")); return onSnapshot(q, s => cb(s.docs.map(d => d.data()))); },
