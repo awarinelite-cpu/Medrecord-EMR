@@ -369,8 +369,16 @@ input[type=number]::-webkit-outer-spin-button,input[type=number]::-webkit-inner-
 .sidebar-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:299}
 
 /* ─── SIDEBAR ─── */
-.sidebar{width:220px;min-height:100vh;background:var(--sb-bg);border-right:3px solid var(--sb-border);display:flex;flex-direction:column;position:fixed;top:0;left:0;bottom:0;z-index:100;overflow-y:auto;}
+.sidebar{width:220px;min-height:100vh;background:var(--sb-bg);border-right:3px solid var(--sb-border);display:flex;flex-direction:column;position:fixed;top:0;left:0;bottom:0;z-index:100;overflow-y:auto;transition:transform .25s ease;}
 .main{flex:1;margin-left:220px;display:flex;flex-direction:column;min-height:100vh;background:var(--bg);transition:transform .25s,margin-left .25s;}
+.sidebar-overlay.open{display:block;}
+
+@media(max-width:900px){
+  .hamburger{display:inline-flex;align-items:center;justify-content:center;background:none;border:none;font-size:22px;cursor:pointer;color:var(--t1);padding:4px 8px;}
+  .sidebar{transform:translateX(-100%);box-shadow:2px 0 20px rgba(0,0,0,.3);}
+  .sidebar.open{transform:translateX(0);}
+  .main{margin-left:0;}
+}
 
 /* ─── TOPBAR ─── */
 .topbar{height:58px;background:var(--topbar);border-bottom:2px solid var(--topbar-bdr);display:flex;align-items:center;justify-content:space-between;padding:0 20px;position:sticky;top:0;z-index:50;gap:10px;box-shadow:0 2px 8px rgba(0,0,0,0.08);}
@@ -2954,7 +2962,7 @@ function MainApp({ user, onLogout }) {
       <NotifPanel open={notifOpen} notifs={notifs} unread={unread} onMarkRead={markRead} onClose={() => setNotifOpen(false)} onSelectPatient={handleSelectPatient} />
 
       {/* Sidebar */}
-      <div className="sidebar-overlay" onClick={() => setSidebarOpen(false)} />
+      <div className={`sidebar-overlay ${sidebarOpen ? "open" : ""}`} onClick={() => setSidebarOpen(false)} />
       <nav className={`sidebar ${sidebarOpen ? "open" : ""}`}>
         <div className="sb-logo">
           <div className="sb-logo-mark">
