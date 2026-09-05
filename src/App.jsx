@@ -516,7 +516,7 @@ tr:hover td{background:var(--td-hover);}
 .modal-footer{padding:11px 18px;border-top:2px solid var(--border2);display:flex;gap:7px;justify-content:flex-end;}
 
 /* ─── LOGIN ─── */
-.login-page{min-height:100vh;display:flex;align-items:center;justify-content:center;background:linear-gradient(135deg,#071540 0%,#0a1c4e 50%,#050e2a 100%);padding:20px;}
+.login-page{min-height:100vh;display:flex;align-items:center;justify-content:center;background-image:url('/assets/login-ward-bg.jpg');background-size:cover;background-position:center;background-repeat:no-repeat;background-color:#071540;padding:20px;}
 .login-box{width:100%;max-width:400px;background:#ffffff;border-radius:var(--r-lg);padding:36px 32px;box-shadow:0 30px 80px rgba(0,0,0,0.4);border-top:4px solid #0a1c4e;}
 .login-logo{text-align:center;margin-bottom:24px;}
 .login-icon{width:48px;height:48px;background:linear-gradient(135deg,#0a1c4e,#1a3a7c);border-radius:13px;display:flex;align-items:center;justify-content:center;font-size:21px;margin:0 auto 9px;}
