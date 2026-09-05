@@ -371,7 +371,7 @@ input[type=number]::-webkit-outer-spin-button,input[type=number]::-webkit-inner-
 .sidebar-overlay.open{display:block;}
 
 /* ─── SIDEBAR (hidden until opened via hamburger, on every screen size) ─── */
-.sidebar{width:220px;min-height:100vh;background:var(--sb-bg);border-right:3px solid var(--sb-border);display:flex;flex-direction:column;position:fixed;top:0;left:0;bottom:0;z-index:100;overflow-y:auto;transition:transform .25s ease;transform:translateX(-100%);box-shadow:2px 0 20px rgba(0,0,0,.3);}
+.sidebar{width:220px;min-height:100vh;background:var(--sb-bg);border-right:3px solid var(--sb-border);display:flex;flex-direction:column;position:fixed;top:0;left:0;bottom:0;z-index:300;overflow-y:auto;transition:transform .25s ease;transform:translateX(-100%);box-shadow:2px 0 20px rgba(0,0,0,.3);}
 .sidebar.open{transform:translateX(0);}
 .main{flex:1;margin-left:0;display:flex;flex-direction:column;min-height:100vh;background:var(--bg);transition:transform .25s,margin-left .25s;}
 
